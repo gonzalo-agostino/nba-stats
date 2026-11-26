@@ -137,6 +137,8 @@ export interface TeamBoxscoreRow {
   pos_group: string;
   ewma_min: number;
   is_out: boolean;
+  injury_status: "OUT" | "DTD" | null;
+  injury_note: string | null;
   base: StatProjection | null;
   scenario: StatProjection | null;
   deltas: StatProjection | null;
@@ -153,6 +155,40 @@ export interface TeamSimulationResponse {
   is_back_to_back: boolean;
   opponent_defense: OpponentDefenseContext | null;
   rows: TeamBoxscoreRow[];
+}
+
+export interface GameSimulationRequest {
+  away_team_id: number;
+  home_team_id: number;
+  away_out_player_ids?: number[] | null;
+  home_out_player_ids?: number[] | null;
+  auto_apply_injuries?: boolean;
+  away_b2b?: boolean;
+  home_b2b?: boolean;
+  limit?: number;
+}
+
+export interface GamePaceSummary {
+  expected_pace: number;
+  pace_label: string;
+  away_pace_10: number;
+  away_pace_rank: number | null;
+  away_def_rating_10: number;
+  away_def_rank: number | null;
+  home_pace_10: number;
+  home_pace_rank: number | null;
+  home_def_rating_10: number;
+  home_def_rank: number | null;
+}
+
+export interface GameSimulationResponse {
+  away: TeamSimulationResponse;
+  home: TeamSimulationResponse;
+  pace_summary: GamePaceSummary;
+  away_out_player_ids: number[];
+  home_out_player_ids: number[];
+  injuries_updated_at: string | null;
+  injuries_fallback: boolean;
 }
 
 export interface SlateGameItem {
@@ -234,6 +270,14 @@ export function simulateTeam(payload: TeamSimulationRequest): Promise<TeamSimula
   });
 }
 
-export function fetchTodaySlate(): Promise<TodaySlateResponse> {
-  return requestJson<TodaySlateResponse>("/api/v1/slate/today");
+export function simulateGame(payload: GameSimulationRequest): Promise<GameSimulationResponse> {
+  return requestJson<GameSimulationResponse>("/api/v1/simulate-game", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchTodaySlate(gameDate?: string): Promise<TodaySlateResponse> {
+  const query = gameDate ? `?game_date=${encodeURIComponent(gameDate)}` : "";
+  return requestJson<TodaySlateResponse>(`/api/v1/slate/today${query}`);
 }

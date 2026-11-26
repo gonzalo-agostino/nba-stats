@@ -68,6 +68,8 @@ class TeamBoxscoreRow(BaseModel):
     pos_group: str
     ewma_min: float
     is_out: bool
+    injury_status: str | None = None
+    injury_note: str | None = None
     base: StatProjection | None = None
     scenario: StatProjection | None = None
     deltas: StatProjection | None = None
@@ -84,6 +86,40 @@ class TeamSimulationResponse(BaseModel):
     is_back_to_back: bool
     opponent_defense: OpponentDefenseContext | None = None
     rows: list[TeamBoxscoreRow] = Field(default_factory=list)
+
+
+class GameSimulationRequest(BaseModel):
+    away_team_id: int
+    home_team_id: int
+    away_out_player_ids: list[int] | None = None
+    home_out_player_ids: list[int] | None = None
+    auto_apply_injuries: bool = False
+    away_b2b: bool = False
+    home_b2b: bool = False
+    limit: int = Field(default=10, ge=1, le=15)
+
+
+class GamePaceSummary(BaseModel):
+    expected_pace: float
+    pace_label: str
+    away_pace_10: float
+    away_pace_rank: int | None = None
+    away_def_rating_10: float
+    away_def_rank: int | None = None
+    home_pace_10: float
+    home_pace_rank: int | None = None
+    home_def_rating_10: float
+    home_def_rank: int | None = None
+
+
+class GameSimulationResponse(BaseModel):
+    away: TeamSimulationResponse
+    home: TeamSimulationResponse
+    pace_summary: GamePaceSummary
+    away_out_player_ids: list[int] = Field(default_factory=list)
+    home_out_player_ids: list[int] = Field(default_factory=list)
+    injuries_updated_at: str | None = None
+    injuries_fallback: bool = False
 
 
 class SlateGameItem(BaseModel):

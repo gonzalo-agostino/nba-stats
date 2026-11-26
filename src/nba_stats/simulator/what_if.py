@@ -874,12 +874,14 @@ class WhatIfSimulator:
         team_id: int,
         opponent_team_id: int | None = None,
         out_player_ids: list[int] | None = None,
+        opponent_out_player_ids: list[int] | None = None,
         is_back_to_back: bool = False,
         is_home: bool = True,
         limit: int = 10,
     ) -> dict[str, Any]:
         """Fast batch boxscore simulation for a team's top rotation players (cost $0 LLM)."""
         out_id_set = set(out_player_ids or [])
+        opp_out_id_set = set(opponent_out_player_ids or [])
 
         with self._connect() as con:
             team_rows = con.execute(
@@ -956,10 +958,18 @@ class WhatIfSimulator:
                 [team_id, team_id, limit],
             ).fetchall()
 
-            # Map out_player_ids to their names
+            # Map out_player_ids and opponent_out_player_ids to their names
             out_names: list[str] = [
                 str(r[1]) for r in roster_rows if int(r[0]) in out_id_set
             ]
+            opp_out_names: list[str] = []
+            if opp_out_id_set:
+                placeholders = ", ".join("?" for _ in opp_out_id_set)
+                opp_name_rows = con.execute(
+                    f"SELECT DISTINCT player_name FROM player_game_logs WHERE player_id IN ({placeholders})",
+                    list(opp_out_id_set),
+                ).fetchall()
+                opp_out_names = [str(x[0]) for x in opp_name_rows]
 
             # Cache matchup features per pos_group across the rotation (max 4 SQL lookups)
             matchup_cache: dict[str, tuple[dict[str, float], OpponentDefenseContext]] = {}
@@ -1014,6 +1024,12 @@ class WhatIfSimulator:
                     player=rp,
                     out_player_names=out_names,
                 )
+                opp_overrides, _, _ = self._compute_opponent_out_override(
+                    con,
+                    player=rp,
+                    opp_team_id=opponent_team_id,
+                    opp_out_names=opp_out_names,
+                )
 
                 base_row: dict[str, float] = {
                     **player_feats,
@@ -1047,6 +1063,7 @@ class WhatIfSimulator:
 
                 scenario_row = dict(base_row)
                 scenario_row.update(wowy_overrides)
+                scenario_row.update(opp_overrides)
                 scenario_row["is_back_to_back"] = 1.0 if is_back_to_back else 0.0
                 scenario_row["rest_days"] = 0.0 if is_back_to_back else 1.0
                 scenario_row["player_rest_days"] = 0.0 if is_back_to_back else 1.0

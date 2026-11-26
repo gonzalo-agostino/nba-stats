@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from nba_stats.agent.graph import build_prediction_graph
 from nba_stats.api.app import create_app
+from nba_stats.api.injuries import InjuryService
 from nba_stats.api.slate import SlateService
 from nba_stats.simulator.schemas import ScenarioRequest
 from nba_stats.simulator.what_if import WhatIfSimulator
@@ -58,6 +59,24 @@ class _FakeSlateService(SlateService):
         }
 
 
+class _FakeInjuryService(InjuryService):
+    def _fetch_raw_json(self) -> dict[str, Any]:
+        return {
+            "injuries": [
+                {
+                    "team": {"abbreviation": "DEN"},
+                    "injuries": [
+                        {
+                            "athlete": {"displayName": "Nikola Jokic"},
+                            "status": "Out",
+                            "shortComment": "Ankle",
+                        }
+                    ],
+                }
+            ]
+        }
+
+
 def test_api_endpoints_end_to_end(tmp_path: Path) -> None:
     settings = _build_temp_warehouse_and_models(tmp_path)
     sim = WhatIfSimulator(settings=settings)
@@ -72,6 +91,7 @@ def test_api_endpoints_end_to_end(tmp_path: Path) -> None:
         simulator=sim,
         agent_graph=graph,
         slate_service=_FakeSlateService(duckdb_path=settings.duckdb_path),
+        injury_service=_FakeInjuryService(),
     )
     client = TestClient(app)
 
@@ -139,6 +159,25 @@ def test_api_endpoints_end_to_end(tmp_path: Path) -> None:
     assert by_id[102]["is_out"] is False
     assert by_id[102]["scenario"]["pra"] > 0
     assert len(by_id[102]["top_drivers"]) == 3
+
+    # Full Game Simulation with automatic injury pre-loading (Jokic auto-marked OUT!)
+    game_sim = client.post(
+        "/api/v1/simulate-game",
+        json={
+            "away_team_id": 1,
+            "home_team_id": 2,
+            "auto_apply_injuries": True,
+            "away_b2b": False,
+            "home_b2b": False,
+        },
+    )
+    assert game_sim.status_code == 200
+    gs = game_sim.json()
+    assert gs["away_out_player_ids"] == [101]
+    assert gs["pace_summary"]["expected_pace"] > 0
+    away_by_id = {r["player_id"]: r for r in gs["away"]["rows"]}
+    assert away_by_id[101]["is_out"] is True
+    assert away_by_id[101]["injury_status"] == "OUT"
 
     # Ask LangGraph agent
     ask_resp = client.post(

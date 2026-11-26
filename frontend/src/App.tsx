@@ -1,85 +1,77 @@
-import { Fragment, useEffect, useState } from "react";
-import { Calendar, Check, ChevronRight, Loader2, Moon, Sparkles, Sun } from "lucide-react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  CornerDownLeft,
+  Loader2,
+  Moon,
+  RefreshCw,
+  Search,
+  Sparkles,
+  Sun,
+  X,
+} from "lucide-react";
 import {
   askAgent,
   fetchTeams,
   fetchTodaySlate,
-  simulateTeam,
+  searchPlayers,
+  simulateGame,
   type AskResponse,
+  type GameSimulationResponse,
+  type PlayerSearchItem,
   type SlateGameItem,
   type TeamBoxscoreRow,
   type TeamItem,
   type TeamSimulationResponse,
 } from "@/lib/api";
-import { cn, formatSigned, humanizeFeature } from "@/lib/utils";
+import { TeamBoxscoreTable } from "@/components/TeamBoxscoreTable";
+import { cn } from "@/lib/utils";
 
-type BoxStatKey = "min" | "pts" | "reb" | "ast" | "pra";
-type EdgeStatKey = "pts" | "reb" | "ast" | "pra";
-
-const STAT_COLS: Array<{ key: BoxStatKey; label: string; bold?: boolean }> = [
-  { key: "min", label: "MIN" },
-  { key: "pts", label: "PTS" },
-  { key: "reb", label: "REB" },
-  { key: "ast", label: "AST" },
-  { key: "pra", label: "PRA", bold: true },
-];
-
-function StatCell({
-  value,
-  delta,
-  bold,
-}: {
-  value: number;
-  delta: number;
-  bold?: boolean;
-}) {
-  const showDelta = Math.abs(delta) >= 0.1;
-  const isPos = delta > 0;
-  return (
-    <td className="num px-3 py-0 text-right align-middle">
-      <span className={cn("text-xs text-[var(--text-primary)]", bold && "font-semibold")}>
-        {value.toFixed(1)}
-      </span>
-      {showDelta ? (
-        <span
-          className={cn(
-            "ml-1 text-[10px] font-medium",
-            isPos
-              ? "text-emerald-600 dark:text-emerald-400"
-              : "text-rose-600 dark:text-rose-400"
-          )}
-        >
-          {formatSigned(delta, 1)}
-        </span>
-      ) : null}
-    </td>
-  );
+function shiftIsoDate(isoDate: string, deltaDays: number): string {
+  const base = isoDate ? new Date(`${isoDate}T12:00:00`) : new Date();
+  base.setDate(base.getDate() + deltaDays);
+  return base.toISOString().slice(0, 10);
 }
 
 export function App() {
   const [darkMode, setDarkMode] = useState(true);
   const [teams, setTeams] = useState<TeamItem[]>([]);
-  const [slateGames, setSlateGames] = useState<SlateGameItem[]>([]);
+
+  // Slate & date navigation
   const [slateDate, setSlateDate] = useState<string>("");
+  const [slateGames, setSlateGames] = useState<SlateGameItem[]>([]);
+  const [slateLoading, setSlateLoading] = useState(false);
   const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
   const [manualMode, setManualMode] = useState(false);
 
-  // Active matchup state
-  const [teamId, setTeamId] = useState<number | null>(null);
-  const [oppTeamId, setOppTeamId] = useState<number | null>(null);
-  const [isHome, setIsHome] = useState(true);
-  const [isB2B, setIsB2B] = useState(false);
-  const [outIds, setOutIds] = useState<number[]>([]);
+  // Unified top search / LangGraph AI query bar
+  const [searchMode, setSearchMode] = useState<"player" | "ai">("player");
+  const [topInput, setTopInput] = useState("");
+  const [playerMatches, setPlayerMatches] = useState<PlayerSearchItem[]>([]);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [globalAiLoading, setGlobalAiLoading] = useState(false);
+  const [globalAiResp, setGlobalAiResp] = useState<AskResponse | null>(null);
+  const [globalAiError, setGlobalAiError] = useState<string | null>(null);
+  const topSearchRef = useRef<HTMLDivElement>(null);
 
-  // Boxscore simulation state
-  const [boxscore, setBoxscore] = useState<TeamSimulationResponse | null>(null);
+  // Active matchup (Away @ Home)
+  const [awayTeamId, setAwayTeamId] = useState<number | null>(null);
+  const [homeTeamId, setHomeTeamId] = useState<number | null>(null);
+  const [awayB2B, setAwayB2B] = useState(false);
+  const [homeB2B, setHomeB2B] = useState(false);
+  // null = auto-apply official ESPN injuries on first load of a matchup
+  const [awayOutIds, setAwayOutIds] = useState<number[] | null>(null);
+  const [homeOutIds, setHomeOutIds] = useState<number[] | null>(null);
+  const [autoApplyInjuries, setAutoApplyInjuries] = useState(true);
+
+  // Full game simulation result
+  const [gameData, setGameData] = useState<GameSimulationResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Expandable player detail + Edge comparator + AI explanation
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [edgeStat, setEdgeStat] = useState<EdgeStatKey>("pts");
-  const [edgeLineInput, setEdgeLineInput] = useState<string>("");
+  // Per-row expandable details & AI
+  const [expandedPlayerId, setExpandedPlayerId] = useState<number | null>(null);
   const [aiLoadingId, setAiLoadingId] = useState<number | null>(null);
   const [aiByPlayer, setAiByPlayer] = useState<Record<number, AskResponse>>({});
   const [aiError, setAiError] = useState<string | null>(null);
@@ -88,67 +80,121 @@ export function App() {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
 
-  function selectSlateGame(game: SlateGameItem, side: "away" | "home" = "away") {
+  useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      if (topSearchRef.current && !topSearchRef.current.contains(e.target as Node)) {
+        setDropdownOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  function selectSlateGame(game: SlateGameItem) {
     setManualMode(false);
     setSelectedGameId(game.game_id);
-    setOutIds([]);
-    setExpandedId(null);
+    setAwayTeamId(game.away_team_id);
+    setHomeTeamId(game.home_team_id);
+    setAwayB2B(game.away_b2b);
+    setHomeB2B(game.home_b2b);
+    setAwayOutIds(null);
+    setHomeOutIds(null);
+    setAutoApplyInjuries(true);
+    setExpandedPlayerId(null);
     setAiByPlayer({});
-    if (side === "away") {
-      setTeamId(game.away_team_id);
-      setOppTeamId(game.home_team_id);
-      setIsHome(false);
-      setIsB2B(game.away_b2b);
-    } else {
-      setTeamId(game.home_team_id);
-      setOppTeamId(game.away_team_id);
-      setIsHome(true);
-      setIsB2B(game.home_b2b);
+  }
+
+  async function loadSlateForDate(targetDate?: string, fallbackTeams?: TeamItem[]) {
+    setSlateLoading(true);
+    try {
+      const slate = await fetchTodaySlate(targetDate);
+      setSlateGames(slate.games);
+      setSlateDate(slate.game_date);
+
+      if (!slate.fallback && slate.games.length > 0) {
+        selectSlateGame(slate.games[0]);
+      } else {
+        setManualMode(true);
+        setSelectedGameId(null);
+        const list = fallbackTeams ?? teams;
+        if ((awayTeamId === null || homeTeamId === null) && list.length > 1) {
+          const den = list.find((t) => t.abbreviation === "DEN") ?? list[0];
+          const lal = list.find((t) => t.abbreviation === "LAL") ?? list[1];
+          setAwayTeamId(den.team_id);
+          setHomeTeamId(lal.team_id);
+          setAwayOutIds(null);
+          setHomeOutIds(null);
+          setAutoApplyInjuries(true);
+        }
+      }
+    } catch {
+      setError(
+        "No se pudo conectar con la API en http://127.0.0.1:8000 (uv run nba-stats serve --reload)."
+      );
+    } finally {
+      setSlateLoading(false);
     }
   }
 
-  // Bootstrap teams + Today's Slate
+  // Initial bootstrap: teams + today's slate
   useEffect(() => {
-    void Promise.all([fetchTeams(), fetchTodaySlate()])
-      .then(([teamList, slate]) => {
+    void fetchTeams()
+      .then((teamList) => {
         setTeams(teamList);
-        setSlateGames(slate.games);
-        setSlateDate(slate.game_date);
-
-        if (!slate.fallback && slate.games.length > 0) {
-          selectSlateGame(slate.games[0], "away");
-        } else {
-          setManualMode(true);
-          const den = teamList.find((t) => t.abbreviation === "DEN") ?? teamList[0];
-          const lal = teamList.find((t) => t.abbreviation === "LAL") ?? teamList[1];
-          if (den) setTeamId(den.team_id);
-          if (lal) setOppTeamId(lal.team_id);
-        }
+        return loadSlateForDate(undefined, teamList);
       })
       .catch(() => {
         setError(
           "No se pudo conectar con la API en http://127.0.0.1:8000 (uv run nba-stats serve --reload)."
         );
       });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-run boxscore simulation on every state change
+  // Debounced player autocomplete
   useEffect(() => {
-    if (teamId === null) return;
+    if (searchMode !== "player") {
+      setPlayerMatches([]);
+      return;
+    }
+    const q = topInput.trim();
+    if (q.length < 2) {
+      setPlayerMatches([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      void searchPlayers(q, 8)
+        .then(setPlayerMatches)
+        .catch(() => setPlayerMatches([]));
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [topInput, searchMode]);
+
+  // Simulate full game (Away + Home with cross-team absences & optional official injury pre-load)
+  useEffect(() => {
+    if (awayTeamId === null || homeTeamId === null || awayTeamId === homeTeamId) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
 
-    void simulateTeam({
-      team_id: teamId,
-      opponent_team_id: oppTeamId,
-      out_player_ids: outIds,
-      is_back_to_back: isB2B,
-      is_home: isHome,
+    void simulateGame({
+      away_team_id: awayTeamId,
+      home_team_id: homeTeamId,
+      away_out_player_ids: awayOutIds,
+      home_out_player_ids: homeOutIds,
+      auto_apply_injuries: autoApplyInjuries,
+      away_b2b: awayB2B,
+      home_b2b: homeB2B,
       limit: 10,
     })
       .then((res) => {
-        if (!cancelled) setBoxscore(res);
+        if (!cancelled) {
+          setGameData(res);
+          // Sync resolved auto-injuries into controlled state so user toggles work seamlessly
+          if (awayOutIds === null) setAwayOutIds(res.away_out_player_ids);
+          if (homeOutIds === null) setHomeOutIds(res.home_out_player_ids);
+          if (autoApplyInjuries) setAutoApplyInjuries(false);
+        }
       })
       .catch((err: Error) => {
         if (!cancelled) setError(err.message);
@@ -160,28 +206,110 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [teamId, oppTeamId, outIds, isB2B, isHome]);
+  }, [awayTeamId, homeTeamId, awayOutIds, homeOutIds, autoApplyInjuries, awayB2B, homeB2B]);
 
-  function toggleOut(playerId: number) {
-    setOutIds((prev) =>
-      prev.includes(playerId) ? prev.filter((id) => id !== playerId) : [...prev, playerId]
+  function handleSelectPlayerFromSearch(player: PlayerSearchItem) {
+    setDropdownOpen(false);
+    setTopInput(player.full_name);
+
+    const slateMatch = slateGames.find(
+      (g) => g.away_team_id === player.team_id || g.home_team_id === player.team_id
     );
-    if (expandedId === playerId) setExpandedId(null);
-    setAiByPlayer({});
+    if (slateMatch) {
+      selectSlateGame(slateMatch);
+    } else {
+      setManualMode(true);
+      setSelectedGameId(null);
+      setAwayTeamId(player.team_id);
+      const fallbackOpp = teams.find((t) => t.team_id !== player.team_id);
+      if (fallbackOpp && (homeTeamId === null || homeTeamId === player.team_id)) {
+        setHomeTeamId(fallbackOpp.team_id);
+      }
+      setAwayOutIds(null);
+      setHomeOutIds(null);
+      setAutoApplyInjuries(true);
+    }
+    setExpandedPlayerId(player.player_id);
   }
 
-  async function handleExplainWithAI(row: TeamBoxscoreRow) {
-    if (!boxscore || aiLoadingId !== null) return;
+  async function handleTopFormSubmit(e: FormEvent) {
+    e.preventDefault();
+    const q = topInput.trim();
+    if (!q) return;
+
+    if (searchMode === "player") {
+      if (playerMatches.length > 0) handleSelectPlayerFromSearch(playerMatches[0]);
+      return;
+    }
+
+    if (globalAiLoading || q.length < 3) return;
+    setGlobalAiLoading(true);
+    setGlobalAiError(null);
+    try {
+      const resp = await askAgent(q);
+      setGlobalAiResp(resp);
+      if (resp.ml_result) {
+        const res = resp.ml_result;
+        const oppTeam = teams.find((t) => t.abbreviation === res.opponent_abbreviation);
+        if (oppTeam) {
+          setManualMode(true);
+          setSelectedGameId(null);
+          if (res.is_home) {
+            setHomeTeamId(res.team_id);
+            setAwayTeamId(oppTeam.team_id);
+            setHomeB2B(res.is_back_to_back);
+          } else {
+            setAwayTeamId(res.team_id);
+            setHomeTeamId(oppTeam.team_id);
+            setAwayB2B(res.is_back_to_back);
+          }
+          setAwayOutIds(null);
+          setHomeOutIds(null);
+          setAutoApplyInjuries(true);
+          setExpandedPlayerId(res.player_id);
+        }
+      }
+    } catch (err) {
+      setGlobalAiError(err instanceof Error ? err.message : "Error consultando al agente LangGraph.");
+    } finally {
+      setGlobalAiLoading(false);
+    }
+  }
+
+  function toggleOut(side: "away" | "home", playerId: number) {
+    setAutoApplyInjuries(false);
+    setAiByPlayer({});
+    if (expandedPlayerId === playerId) setExpandedPlayerId(null);
+
+    if (side === "away") {
+      const curr = awayOutIds ?? [];
+      setAwayOutIds(
+        curr.includes(playerId) ? curr.filter((id) => id !== playerId) : [...curr, playerId]
+      );
+    } else {
+      const curr = homeOutIds ?? [];
+      setHomeOutIds(
+        curr.includes(playerId) ? curr.filter((id) => id !== playerId) : [...curr, playerId]
+      );
+    }
+  }
+
+  async function handleExplainWithAI(row: TeamBoxscoreRow, teamData: TeamSimulationResponse) {
+    if (!gameData || aiLoadingId !== null) return;
     setAiLoadingId(row.player_id);
     setAiError(null);
 
-    const outNames = boxscore.rows.filter((r) => r.is_out).map((r) => r.player_name);
+    const ownOuts = teamData.rows.filter((r) => r.is_out).map((r) => r.player_name);
+    const otherTeam = teamData.is_home ? gameData.away : gameData.home;
+    const oppOuts = otherTeam.rows.filter((r) => r.is_out).map((r) => r.player_name);
+
     const parts = [
       `Cómo proyecta ${row.player_name}`,
-      isHome ? "de local" : "de visitante",
-      boxscore.opponent_abbreviation !== "AVG" ? `contra ${boxscore.opponent_abbreviation}` : "",
-      isB2B ? "en back-to-back" : "",
-      outNames.length > 0 ? `sin ${outNames.join(" ni ")}` : "",
+      teamData.is_home ? "de local" : "de visitante",
+      `contra ${teamData.opponent_abbreviation}`,
+      teamData.is_back_to_back ? "en back-to-back" : "",
+      ownOuts.length > 0 ? `sin ${ownOuts.join(" ni ")}` : "",
+      oppOuts.length > 0 ? `y con ${oppOuts.join(" y ")} fuera en el rival` : "",
     ].filter(Boolean);
 
     try {
@@ -195,45 +323,247 @@ export function App() {
   }
 
   const activeGame = slateGames.find((g) => g.game_id === selectedGameId) ?? null;
-  const oppDef = boxscore?.opponent_defense ?? null;
+  const awayTeamObj = teams.find((t) => t.team_id === awayTeamId);
+  const homeTeamObj = teams.find((t) => t.team_id === homeTeamId);
+
+  const allOutLabels: string[] = [];
+  if (gameData) {
+    for (const r of gameData.away.rows) {
+      if (r.is_out) allOutLabels.push(`${r.player_name} (${gameData.away.team_abbreviation})`);
+    }
+    for (const r of gameData.home.rows) {
+      if (r.is_out) allOutLabels.push(`${r.player_name} (${gameData.home.team_abbreviation})`);
+    }
+  }
 
   return (
     <div className="min-h-screen bg-[var(--bg-canvas)] text-[var(--text-primary)]">
-      <div className="mx-auto max-w-5xl p-4 sm:py-5">
-        {/* 1. Today's Slate horizontal strip */}
-        <section className="mb-3 flex items-center gap-2 overflow-x-auto pb-1">
-          <div className="flex shrink-0 items-center gap-1.5 pr-1 text-[11px] font-medium text-[var(--text-muted)]">
-            <Calendar className="h-3.5 w-3.5 text-[var(--accent)]" />
-            <span className="num">{slateDate || "Hoy"}</span>
-          </div>
+      <div className="mx-auto max-w-6xl p-4 sm:py-5">
+        {/* 1. Top Unified Bar: Brand + Player Search / LangGraph AI + Theme */}
+        <div ref={topSearchRef} className="relative mb-3">
+          <div className="flex items-center gap-2">
+            <span className="hidden text-sm font-bold tracking-tight text-[var(--text-primary)] sm:inline">
+              NBA<span className="text-amber-500">Stats</span>
+            </span>
 
-          {slateGames.map((g) => {
-            const isActive = !manualMode && selectedGameId === g.game_id;
-            const hasB2B = g.away_b2b || g.home_b2b;
-            return (
+            <div className="inline-flex h-9 shrink-0 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-0.5 text-xs">
               <button
-                key={g.game_id}
                 type="button"
-                title={g.game_status}
-                onClick={() => selectSlateGame(g, "away")}
+                onClick={() => {
+                  setSearchMode("player");
+                  setGlobalAiError(null);
+                }}
                 className={cn(
-                  "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors cursor-pointer",
-                  isActive
-                    ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]"
-                    : "border-[var(--border-hairline)] bg-[var(--bg-panel)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  "rounded px-2.5 font-medium transition-colors cursor-pointer",
+                  searchMode === "player"
+                    ? "bg-[var(--accent)] text-white"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                 )}
               >
-                <span className="num font-semibold">
-                  {g.away_abbr} @ {g.home_abbr}
-                </span>
-                {hasB2B ? (
-                  <span className="rounded bg-amber-500/15 px-1 text-[9px] font-semibold text-amber-500">
-                    B2B
-                  </span>
-                ) : null}
+                Jugador
               </button>
-            );
-          })}
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchMode("ai");
+                  setDropdownOpen(false);
+                }}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded px-2.5 font-medium transition-colors cursor-pointer",
+                  searchMode === "ai"
+                    ? "bg-[var(--accent)] text-white"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                )}
+              >
+                <Sparkles className="h-3 w-3" />
+                Consultar IA
+              </button>
+            </div>
+
+            <form
+              onSubmit={handleTopFormSubmit}
+              className="flex h-9 flex-1 items-center gap-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-2.5 focus-within:border-[var(--accent)]"
+            >
+              {searchMode === "player" ? (
+                <Search className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
+              )}
+              <input
+                type="text"
+                value={topInput}
+                onFocus={() => searchMode === "player" && setDropdownOpen(true)}
+                onChange={(e) => {
+                  setTopInput(e.target.value);
+                  if (searchMode === "player") setDropdownOpen(true);
+                }}
+                placeholder={
+                  searchMode === "player"
+                    ? "Buscar jugador (ej. Jokic, Brunson, Tatum)..."
+                    : "Consultar al Agente LangGraph (ej. Jamal Murray vs LAL en B2B sin Jokic)..."
+                }
+                className="h-full flex-1 bg-transparent text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
+              />
+              {topInput ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTopInput("");
+                    setPlayerMatches([]);
+                  }}
+                  aria-label="Limpiar"
+                  className="text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              ) : null}
+              {searchMode === "ai" ? (
+                <button
+                  type="submit"
+                  disabled={globalAiLoading || topInput.trim().length < 3}
+                  className="inline-flex h-6 items-center gap-1 rounded bg-[var(--accent)] px-2 text-[11px] font-medium text-white disabled:opacity-40 cursor-pointer"
+                >
+                  {globalAiLoading ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <CornerDownLeft className="h-3 w-3" />
+                  )}
+                  Enviar
+                </button>
+              ) : null}
+            </form>
+
+            <button
+              type="button"
+              onClick={() => setDarkMode((d) => !d)}
+              aria-label="Cambiar tema"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] cursor-pointer"
+            >
+              {darkMode ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+            </button>
+          </div>
+
+          {searchMode === "player" && dropdownOpen && playerMatches.length > 0 ? (
+            <div className="absolute left-0 right-0 z-30 mt-1 max-h-64 overflow-y-auto rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] py-1">
+              {playerMatches.map((p) => (
+                <button
+                  key={p.player_id}
+                  type="button"
+                  onClick={() => handleSelectPlayerFromSearch(p)}
+                  className="flex h-9 w-full items-center justify-between px-3 text-left text-xs transition-colors hover:bg-[var(--bg-subtle)] cursor-pointer"
+                >
+                  <span className="font-medium text-[var(--text-primary)]">
+                    {p.full_name}
+                    <span className="num ml-2 text-[11px] text-[var(--text-muted)]">
+                      {p.team_abbreviation} · {p.pos_group}
+                    </span>
+                  </span>
+                  <span className="num text-[11px] text-[var(--text-secondary)]">
+                    {p.avg_min_10.toFixed(1)}m · {p.avg_pts_10.toFixed(1)} pts
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {globalAiError ? (
+            <div className="mt-2 rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
+              {globalAiError}
+            </div>
+          ) : null}
+          {globalAiResp ? (
+            <div className="mt-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-3.5 py-2.5 text-xs">
+              <div className="mb-1.5 flex items-center justify-between">
+                <span className="font-semibold text-[var(--text-secondary)]">
+                  Respuesta del Agente LangGraph{" "}
+                  {globalAiResp.verification_passed ? (
+                    <span className="ml-1 font-medium text-emerald-600 dark:text-emerald-400">
+                      · Verificado
+                    </span>
+                  ) : null}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setGlobalAiResp(null)}
+                  className="text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
+                {globalAiResp.clarification_message ||
+                  globalAiResp.analysis ||
+                  globalAiResp.final_response}
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {/* 2. Date Picker + Slate Games Strip */}
+        <section className="mb-4 flex items-center gap-2 overflow-x-auto pb-1">
+          <div className="inline-flex h-7 shrink-0 items-center rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)]">
+            <button
+              type="button"
+              aria-label="Día anterior"
+              onClick={() => void loadSlateForDate(shiftIsoDate(slateDate, -1))}
+              className="flex h-full w-6 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+            </button>
+            <input
+              type="date"
+              aria-label="Fecha de partidos"
+              value={slateDate}
+              onChange={(e) => {
+                if (e.target.value) void loadSlateForDate(e.target.value);
+              }}
+              className="num h-full bg-transparent px-1 text-[11px] font-medium text-[var(--text-primary)] focus:outline-none cursor-pointer"
+            />
+            <button
+              type="button"
+              aria-label="Día siguiente"
+              onClick={() => void loadSlateForDate(shiftIsoDate(slateDate, 1))}
+              className="flex h-full w-6 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+            >
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {slateLoading ? (
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--accent)]" />
+          ) : slateGames.length === 0 ? (
+            <span className="shrink-0 text-[11px] text-[var(--text-muted)]">
+              Sin partidos programados
+            </span>
+          ) : (
+            slateGames.map((g) => {
+              const isActive = !manualMode && selectedGameId === g.game_id;
+              const hasB2B = g.away_b2b || g.home_b2b;
+              return (
+                <button
+                  key={g.game_id}
+                  type="button"
+                  title={g.game_status}
+                  onClick={() => selectSlateGame(g)}
+                  className={cn(
+                    "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors cursor-pointer",
+                    isActive
+                      ? "border-amber-500 bg-amber-500/12 text-amber-600 dark:text-amber-400"
+                      : "border-[var(--border-hairline)] bg-[var(--bg-panel)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  )}
+                >
+                  <span className="num font-semibold">
+                    {g.away_abbr} @ {g.home_abbr}
+                  </span>
+                  {hasB2B ? (
+                    <span className="rounded bg-amber-500/15 px-1 text-[9px] font-semibold text-amber-500">
+                      B2B
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })
+          )}
 
           <button
             type="button"
@@ -244,7 +574,7 @@ export function App() {
             className={cn(
               "inline-flex h-7 shrink-0 items-center rounded-md border px-2.5 text-xs font-medium transition-colors cursor-pointer",
               manualMode
-                ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]"
+                ? "border-amber-500 bg-amber-500/12 text-amber-600 dark:text-amber-400"
                 : "border-[var(--border-hairline)] bg-[var(--bg-panel)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
             )}
           >
@@ -252,144 +582,76 @@ export function App() {
           </button>
         </section>
 
-        {/* 2. Single-line Context Bar */}
-        <header className="mb-3 flex flex-wrap items-center justify-between gap-2 border-y border-[var(--border-hairline)] py-2.5">
-          <div className="flex flex-wrap items-center gap-2">
-            {!manualMode && activeGame ? (
-              /* Quick Away / Home tabs for the selected slate game */
-              <div className="inline-flex rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-0.5 text-xs">
-                <button
-                  type="button"
-                  onClick={() => selectSlateGame(activeGame, "away")}
-                  className={cn(
-                    "inline-flex items-center gap-1 rounded px-2.5 py-1 font-medium transition-colors cursor-pointer",
-                    teamId === activeGame.away_team_id
-                      ? "bg-[var(--accent)] text-white"
-                      : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                  )}
-                >
-                  <span>{activeGame.away_abbr} (Visitante)</span>
-                  {activeGame.away_b2b ? (
-                    <span className="text-[9px] font-bold opacity-90">B2B</span>
-                  ) : null}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => selectSlateGame(activeGame, "home")}
-                  className={cn(
-                    "inline-flex items-center gap-1 rounded px-2.5 py-1 font-medium transition-colors cursor-pointer",
-                    teamId === activeGame.home_team_id
-                      ? "bg-[var(--accent)] text-white"
-                      : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                  )}
-                >
-                  <span>{activeGame.home_abbr} (Local)</span>
-                  {activeGame.home_b2b ? (
-                    <span className="text-[9px] font-bold opacity-90">B2B</span>
-                  ) : null}
-                </button>
-              </div>
-            ) : (
-              /* Manual Team vs Opponent selectors */
-              <div className="flex items-center gap-1.5">
-                <select
-                  aria-label="Equipo"
-                  value={teamId ?? ""}
-                  onChange={(e) => {
-                    setTeamId(Number(e.target.value));
-                    setOutIds([]);
-                    setExpandedId(null);
-                    setAiByPlayer({});
-                  }}
-                  className="h-8 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-2 text-xs font-semibold text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
-                >
-                  {teams.map((t) => (
-                    <option key={t.team_id} value={t.team_id}>
-                      {t.abbreviation} — {t.full_name}
-                    </option>
-                  ))}
-                </select>
-                <span className="text-xs text-[var(--text-muted)]">{isHome ? "vs" : "@"}</span>
-                <select
-                  aria-label="Rival"
-                  value={oppTeamId ?? ""}
-                  onChange={(e) => {
-                    setOppTeamId(e.target.value ? Number(e.target.value) : null);
-                    setAiByPlayer({});
-                  }}
-                  className="h-8 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-2 text-xs font-medium text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
-                >
-                  <option value="">Promedio liga</option>
-                  {teams
-                    .filter((t) => t.team_id !== teamId)
-                    .map((t) => (
-                      <option key={t.team_id} value={t.team_id}>
-                        {t.abbreviation} — {t.full_name}
-                      </option>
-                    ))}
-                </select>
-              </div>
-            )}
-
-            {/* Editable Local/Visitante & B2B toggles */}
-            <button
-              type="button"
-              onClick={() => {
-                setIsHome((h) => !h);
-                setAiByPlayer({});
+        {/* Manual Matchup Selector (only when Manual is active) */}
+        {manualMode ? (
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-3 py-2 text-xs">
+            <span className="text-[var(--text-muted)]">Visitante:</span>
+            <select
+              value={awayTeamId ?? ""}
+              onChange={(e) => {
+                setAwayTeamId(Number(e.target.value));
+                setAwayOutIds(null);
+                setAutoApplyInjuries(true);
               }}
-              className="h-8 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-2.5 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] cursor-pointer"
+              className="h-7 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2 font-medium text-[var(--text-primary)]"
             >
-              {isHome ? "Local" : "Visitante"}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setIsB2B((b) => !b);
-                setAiByPlayer({});
+              {teams.map((t) => (
+                <option key={t.team_id} value={t.team_id}>
+                  {t.abbreviation} — {t.full_name}
+                </option>
+              ))}
+            </select>
+            <span className="text-[var(--text-muted)]">@ Local:</span>
+            <select
+              value={homeTeamId ?? ""}
+              onChange={(e) => {
+                setHomeTeamId(Number(e.target.value));
+                setHomeOutIds(null);
+                setAutoApplyInjuries(true);
               }}
-              className={cn(
-                "h-8 rounded-md border px-2.5 text-xs font-medium transition-colors cursor-pointer",
-                isB2B
-                  ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]"
-                  : "border-[var(--border-hairline)] bg-[var(--bg-panel)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-              )}
+              className="h-7 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2 font-medium text-[var(--text-primary)]"
             >
-              B2B
-            </button>
-
-            {outIds.length > 0 ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setOutIds([]);
-                  setAiByPlayer({});
-                }}
-                className="h-8 rounded-md border border-rose-500/35 bg-rose-500/10 px-2.5 text-xs font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-500/15 cursor-pointer"
-              >
-                Limpiar bajas ({outIds.length})
-              </button>
-            ) : null}
+              {teams
+                .filter((t) => t.team_id !== awayTeamId)
+                .map((t) => (
+                  <option key={t.team_id} value={t.team_id}>
+                    {t.abbreviation} — {t.full_name}
+                  </option>
+                ))}
+            </select>
           </div>
+        ) : null}
 
-          <div className="flex items-center gap-2.5">
-            {oppDef && oppDef.def_rating_rank !== null ? (
-              <span className="num hidden text-[11px] text-[var(--text-muted)] md:inline">
-                Rival Def #{oppDef.def_rating_rank} · Pace #{oppDef.pace_rank ?? "-"}
+        {/* 3. Matchup Headline (LudoProps style: AWAY | time | HOME) */}
+        {awayTeamObj && homeTeamObj ? (
+          <div className="mb-3 flex items-center justify-between px-1">
+            <div>
+              <div className="num text-xl font-bold tracking-tight text-[var(--text-primary)]">
+                {awayTeamObj.abbreviation}
+              </div>
+              <div className="text-xs text-[var(--text-muted)]">{awayTeamObj.full_name}</div>
+            </div>
+
+            <div className="flex flex-col items-center">
+              <span className="num text-xs font-medium text-[var(--text-secondary)]">
+                {activeGame?.game_status ?? "Simulación manual"}
               </span>
-            ) : null}
-            {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--accent)]" /> : null}
-            <button
-              type="button"
-              onClick={() => setDarkMode((d) => !d)}
-              aria-label="Cambiar tema"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] cursor-pointer"
-            >
-              {darkMode ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
-            </button>
+              {loading ? (
+                <span className="mt-0.5 inline-flex items-center gap-1 text-[10px] text-amber-500">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Actualizando
+                </span>
+              ) : null}
+            </div>
+
+            <div className="text-right">
+              <div className="num text-xl font-bold tracking-tight text-[var(--text-primary)]">
+                {homeTeamObj.abbreviation}
+              </div>
+              <div className="text-xs text-[var(--text-muted)]">{homeTeamObj.full_name}</div>
+            </div>
           </div>
-        </header>
+        ) : null}
 
         {error ? (
           <div className="mb-3 rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
@@ -397,252 +659,136 @@ export function App() {
           </div>
         ) : null}
 
-        {/* 3. Protagonist Boxscore Table */}
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse">
-            <thead>
-              <tr className="border-b border-[var(--border-hairline)] text-[11px] font-medium text-[var(--text-muted)]">
-                <th className="w-10 px-2 py-2 text-center">OUT</th>
-                <th className="px-2 py-2 text-left">JUGADOR</th>
-                <th className="w-12 px-2 py-2 text-center">POS</th>
-                {STAT_COLS.map((col) => (
-                  <th key={col.key} className="px-3 py-2 text-right">
-                    {col.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[var(--border-hairline)]">
-              {!boxscore ? (
-                <tr>
-                  <td colSpan={8} className="py-10 text-center text-xs text-[var(--text-muted)]">
-                    {loading ? "Calculando boxscore..." : "Seleccioná un partido o equipo."}
-                  </td>
-                </tr>
-              ) : (
-                boxscore.rows.map((row) => {
-                  const isExpanded = expandedId === row.player_id && !row.is_out;
-                  const aiResp = aiByPlayer[row.player_id];
+        {/* 4. Pace & Defense Summary Card + Unified "Si no juegan" Bar */}
+        {gameData ? (
+          <div className="mb-4 space-y-2.5">
+            {/* Ritmo y Defensa del partido */}
+            <div className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-4 py-3">
+              <div className="mb-2 flex flex-wrap items-baseline gap-2">
+                <span className="text-xs text-[var(--text-muted)]">Ritmo del partido</span>
+                <span className="text-sm font-bold text-[var(--text-primary)]">
+                  {gameData.pace_summary.pace_label}
+                </span>
+                <span className="num text-xs text-[var(--text-secondary)]">
+                  {gameData.pace_summary.expected_pace.toFixed(1)} posesiones esperadas
+                </span>
+              </div>
 
-                  const parsedLine = Number.parseFloat(edgeLineInput);
-                  const hasValidLine = !Number.isNaN(parsedLine) && edgeLineInput.trim() !== "";
-                  const projectedForEdge = row.scenario ? row.scenario[edgeStat] : 0;
-                  const edgeValue = hasValidLine ? projectedForEdge - parsedLine : null;
+              <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+                <div className="num text-[var(--text-secondary)]">
+                  <span className="font-semibold text-[var(--text-primary)]">
+                    {gameData.away.team_abbreviation}
+                  </span>{" "}
+                  · Pace {gameData.pace_summary.away_pace_10.toFixed(1)}{" "}
+                  {gameData.pace_summary.away_pace_rank
+                    ? `(#${gameData.pace_summary.away_pace_rank})`
+                    : ""}{" "}
+                  · DefRtg {gameData.pace_summary.away_def_rating_10.toFixed(1)}{" "}
+                  {gameData.pace_summary.away_def_rank
+                    ? `(#${gameData.pace_summary.away_def_rank})`
+                    : ""}
+                </div>
+                <div className="num text-[var(--text-secondary)] sm:text-right">
+                  <span className="font-semibold text-[var(--text-primary)]">
+                    {gameData.home.team_abbreviation}
+                  </span>{" "}
+                  · Pace {gameData.pace_summary.home_pace_10.toFixed(1)}{" "}
+                  {gameData.pace_summary.home_pace_rank
+                    ? `(#${gameData.pace_summary.home_pace_rank})`
+                    : ""}{" "}
+                  · DefRtg {gameData.pace_summary.home_def_rating_10.toFixed(1)}{" "}
+                  {gameData.pace_summary.home_def_rank
+                    ? `(#${gameData.pace_summary.home_def_rank})`
+                    : ""}
+                </div>
+              </div>
+            </div>
 
-                  return (
-                    <Fragment key={row.player_id}>
-                      <tr
-                        className={cn(
-                          "h-10 transition-colors",
-                          row.is_out ? "opacity-45" : "hover:bg-[var(--bg-panel)]",
-                          isExpanded && "bg-[var(--bg-panel)]"
-                        )}
-                      >
-                        <td className="px-2 py-0 text-center align-middle">
-                          <button
-                            type="button"
-                            onClick={() => toggleOut(row.player_id)}
-                            aria-label={`Marcar ${row.player_name} como OUT`}
-                            className={cn(
-                              "inline-flex h-4 w-4 items-center justify-center rounded border transition-colors cursor-pointer",
-                              row.is_out
-                                ? "border-rose-500 bg-rose-500 text-white"
-                                : "border-[var(--border-hairline)] bg-[var(--bg-panel)] hover:border-[var(--accent)]"
-                            )}
-                          >
-                            {row.is_out ? <Check className="h-3 w-3 stroke-[3]" /> : null}
-                          </button>
-                        </td>
+            {/* Si no juegan (unified absences bar across both teams) */}
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-4 py-2.5">
+              <div className="space-y-0.5 text-xs">
+                <div className="font-semibold text-[var(--text-primary)]">Si no juegan</div>
+                <div className="text-[var(--text-secondary)]">
+                  {allOutLabels.length > 0 ? (
+                    <>Sin {allOutLabels.join(", ")}. Ambas tablas ya recalculan las bajas propias y rivales.</>
+                  ) : (
+                    <>Sin bajas activas. Tildá OUT en cualquier jugador de ambos equipos para simular.</>
+                  )}
+                </div>
+              </div>
 
-                        <td className="px-2 py-0 align-middle">
-                          <button
-                            type="button"
-                            disabled={row.is_out}
-                            onClick={() => {
-                              setExpandedId((curr) =>
-                                curr === row.player_id ? null : row.player_id
-                              );
-                              setEdgeLineInput("");
-                              setAiError(null);
-                            }}
-                            className={cn(
-                              "inline-flex items-center gap-1.5 text-left text-xs font-medium text-[var(--text-primary)]",
-                              row.is_out
-                                ? "line-through cursor-default"
-                                : "hover:text-[var(--accent)] cursor-pointer"
-                            )}
-                          >
-                            {!row.is_out ? (
-                              <ChevronRight
-                                className={cn(
-                                  "h-3 w-3 shrink-0 text-[var(--text-muted)] transition-transform",
-                                  isExpanded && "rotate-90 text-[var(--accent)]"
-                                )}
-                              />
-                            ) : null}
-                            <span>{row.player_name}</span>
-                          </button>
-                        </td>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAwayOutIds(null);
+                    setHomeOutIds(null);
+                    setAutoApplyInjuries(true);
+                  }}
+                  className="inline-flex h-7 items-center gap-1 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2.5 text-[11px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] cursor-pointer"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  Pre-cargar lesiones
+                </button>
+                {allOutLabels.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAutoApplyInjuries(false);
+                      setAwayOutIds([]);
+                      setHomeOutIds([]);
+                      setAiByPlayer({});
+                    }}
+                    className="h-7 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2.5 text-[11px] font-medium text-rose-500 transition-colors hover:border-rose-500/40 cursor-pointer"
+                  >
+                    Quitar bajas
+                  </button>
+                ) : null}
+              </div>
+            </div>
 
-                        <td className="num px-2 py-0 text-center align-middle text-[11px] text-[var(--text-muted)]">
-                          {row.pos_group}
-                        </td>
+            {/* 5. Side-by-Side Boxscore Tables (Visitante | Local) */}
+            <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+              <TeamBoxscoreTable
+                teamFullName={awayTeamObj?.full_name ?? gameData.away.team_abbreviation}
+                roleLabel="Visitante"
+                data={gameData.away}
+                isB2B={awayB2B}
+                onToggleB2B={() => setAwayB2B((v) => !v)}
+                onToggleOut={(pid) => toggleOut("away", pid)}
+                expandedPlayerId={expandedPlayerId}
+                onToggleExpand={(pid) =>
+                  setExpandedPlayerId((curr) => (curr === pid ? null : pid))
+                }
+                aiLoadingId={aiLoadingId}
+                aiByPlayer={aiByPlayer}
+                aiError={aiError}
+                onExplainWithAI={handleExplainWithAI}
+              />
 
-                        {row.is_out || !row.scenario || !row.deltas ? (
-                          <td
-                            colSpan={STAT_COLS.length}
-                            className="num px-3 py-0 text-right align-middle text-[11px] text-[var(--text-muted)]"
-                          >
-                            OUT ({row.ewma_min.toFixed(1)}m)
-                          </td>
-                        ) : (
-                          STAT_COLS.map((col) => (
-                            <StatCell
-                              key={col.key}
-                              value={row.scenario![col.key]}
-                              delta={row.deltas![col.key]}
-                              bold={col.bold}
-                            />
-                          ))
-                        )}
-                      </tr>
-
-                      {/* 4. On-Demand Expandable Detail Panel (3 horizontal blocks) */}
-                      {isExpanded && row.scenario ? (
-                        <tr className="bg-[var(--bg-panel)]/75">
-                          <td colSpan={8} className="px-4 py-3">
-                            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                              {/* Block 1: Top 3 SHAP Drivers */}
-                              <div className="space-y-1 text-xs">
-                                <div className="text-[11px] font-semibold text-[var(--text-secondary)]">
-                                  Factores clave (PTS)
-                                </div>
-                                <ul className="space-y-0.5 text-[11px]">
-                                  {row.top_drivers.slice(0, 3).map((d) => (
-                                    <li key={d.feature} className="flex items-center justify-between gap-2">
-                                      <span className="truncate text-[var(--text-primary)]">
-                                        {humanizeFeature(d.feature)}
-                                      </span>
-                                      <span
-                                        className={cn(
-                                          "num shrink-0 font-medium",
-                                          d.shap_value >= 0
-                                            ? "text-emerald-600 dark:text-emerald-400"
-                                            : "text-rose-600 dark:text-rose-400"
-                                        )}
-                                      >
-                                        {formatSigned(d.shap_value, 2)}
-                                      </span>
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-
-                              {/* Block 2: Real WOWY History */}
-                              <div className="space-y-1 text-xs">
-                                <div className="text-[11px] font-semibold text-[var(--text-secondary)]">
-                                  Historial WOWY
-                                </div>
-                                {row.wowy ? (
-                                  <div className="space-y-0.5 text-[11px]">
-                                    <div className="text-[var(--text-muted)]">
-                                      Sin {row.wowy.primary_out_player} ({row.wowy.sample_games_without} sin /{" "}
-                                      {row.wowy.sample_games_with} con)
-                                    </div>
-                                    <div className="num text-[var(--text-primary)]">
-                                      MIN {formatSigned(row.wowy.raw_delta_min, 1)} · PTS{" "}
-                                      {formatSigned(row.wowy.raw_delta_pts, 1)} · REB{" "}
-                                      {formatSigned(row.wowy.raw_delta_reb, 1)} · AST{" "}
-                                      {formatSigned(row.wowy.raw_delta_ast, 1)}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <p className="text-[11px] text-[var(--text-muted)]">
-                                    Tildá un compañero como OUT para ver su historial WOWY real.
-                                  </p>
-                                )}
-                              </div>
-
-                              {/* Block 3: Line Edge Comparator + AI Agent */}
-                              <div className="space-y-2 text-xs">
-                                <div className="text-[11px] font-semibold text-[var(--text-secondary)]">
-                                  Comparador de Línea (Edge)
-                                </div>
-                                <div className="flex flex-wrap items-center gap-1.5">
-                                  <select
-                                    aria-label="Estadística para línea"
-                                    value={edgeStat}
-                                    onChange={(e) => setEdgeStat(e.target.value as EdgeStatKey)}
-                                    className="h-7 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-1.5 text-[11px] font-semibold uppercase text-[var(--text-primary)]"
-                                  >
-                                    <option value="pts">PTS</option>
-                                    <option value="reb">REB</option>
-                                    <option value="ast">AST</option>
-                                    <option value="pra">PRA</option>
-                                  </select>
-                                  <input
-                                    type="number"
-                                    step="0.5"
-                                    value={edgeLineInput}
-                                    onChange={(e) => setEdgeLineInput(e.target.value)}
-                                    placeholder={projectedForEdge.toFixed(1)}
-                                    className="num h-7 w-18 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
-                                  />
-                                  {edgeValue !== null ? (
-                                    <span
-                                      className={cn(
-                                        "num rounded px-1.5 py-0.5 text-xs font-semibold",
-                                        edgeValue >= 0
-                                          ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                                          : "bg-rose-500/15 text-rose-600 dark:text-rose-400"
-                                      )}
-                                    >
-                                      Edge {formatSigned(edgeValue, 1)}
-                                    </span>
-                                  ) : null}
-
-                                  <button
-                                    type="button"
-                                    disabled={aiLoadingId !== null}
-                                    onClick={() => void handleExplainWithAI(row)}
-                                    className="ml-auto inline-flex h-7 items-center gap-1 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2 text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-45 cursor-pointer"
-                                  >
-                                    {aiLoadingId === row.player_id ? (
-                                      <Loader2 className="h-3 w-3 animate-spin" />
-                                    ) : (
-                                      <Sparkles className="h-3 w-3 text-[var(--accent)]" />
-                                    )}
-                                    Explicar con IA
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-
-                            {aiError && aiLoadingId === null ? (
-                              <div className="mt-2.5 text-xs text-rose-600 dark:text-rose-400">
-                                {aiError}
-                              </div>
-                            ) : null}
-
-                            {aiResp ? (
-                              <div className="mt-3 border-t border-[var(--border-hairline)] pt-2.5 text-xs leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
-                                {aiResp.analysis || aiResp.final_response}
-                              </div>
-                            ) : null}
-                          </td>
-                        </tr>
-                      ) : null}
-                    </Fragment>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        <footer className="mt-3 text-[11px] text-[var(--text-muted)]">
-          Tildá OUT para recalcular el equipo en vivo · Clic en cualquier jugador para ver SHAP, WOWY, Edge e IA
-        </footer>
+              <TeamBoxscoreTable
+                teamFullName={homeTeamObj?.full_name ?? gameData.home.team_abbreviation}
+                roleLabel="Local"
+                data={gameData.home}
+                isB2B={homeB2B}
+                onToggleB2B={() => setHomeB2B((v) => !v)}
+                onToggleOut={(pid) => toggleOut("home", pid)}
+                expandedPlayerId={expandedPlayerId}
+                onToggleExpand={(pid) =>
+                  setExpandedPlayerId((curr) => (curr === pid ? null : pid))
+                }
+                aiLoadingId={aiLoadingId}
+                aiByPlayer={aiByPlayer}
+                aiError={aiError}
+                onExplainWithAI={handleExplainWithAI}
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="py-12 text-center text-xs text-[var(--text-muted)]">
+            {loading ? "Cargando partido y reporte oficial de lesiones..." : "Seleccioná un partido."}
+          </div>
+        )}
       </div>
     </div>
   );
