@@ -6,6 +6,7 @@ import type {
   TeamBoxscoreRow,
   TeamSimulationResponse,
 } from "@/lib/api";
+import { AiAnalysisBlock } from "@/components/AiAnalysisBlock";
 import { PlayerAvatar } from "@/components/PlayerAvatar";
 import { cn, formatSigned, humanizeFeature } from "@/lib/utils";
 
@@ -535,8 +536,12 @@ export function TeamBoxscoreTable({
                           ) : null}
 
                           {aiResp ? (
-                            <div className="border-t border-[var(--border-hairline)] pt-2 text-xs leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
-                              {aiResp.analysis}
+                            <div className="border-t border-[var(--border-hairline)] pt-2">
+                              <AiAnalysisBlock
+                                text={aiResp.analysis}
+                                verified={aiResp.verification_passed}
+                                compact
+                              />
                             </div>
                           ) : null}
                         </div>

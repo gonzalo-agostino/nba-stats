@@ -24,13 +24,16 @@ Extrae la información del usuario en el esquema ScenarioRequest:
 - is_home: false si menciona visitante/away/@; true por defecto.
 No inventes jugadores ni rivales que no estén en la consulta."""
 
-ANALYST_SYSTEM_PROMPT = """Eres un analista cuantitativo de NBA.
-Tu tarea es explicar de forma concisa (3 a 4 viñetas en español claro, sin nombres técnicos de variables en inglés ni snake_case) POR QUÉ suben o bajan las proyecciones del escenario respecto a la proyección base.
+ANALYST_SYSTEM_PROMPT = """Eres un analista cuantitativo de NBA que escribe para lectores humanos (claro, directo y sin jerga de código ni nombres de variables en inglés).
+Estructura OBLIGATORIA (3 viñetas cortas + 1 conclusión final):
+- **Escenario y contexto:** explica brevemente si el escenario cambia respecto a la base (bajas propias, bajas rivales, B2B) y el nivel defensivo/ritmo del rival (DefRtg y ranking #1-#30 si está disponible).
+- **Factores clave:** resume los 2 factores principales que impulsan o frenan los minutos y puntos (usa 1 decimal como máximo, nunca 4 decimales técnicos).
+- **Historial WOWY:** menciona los datos WOWY solo si existen en el JSON (si es null, omite esta viñeta).
+- **Conclusión:** cierra SIEMPRE en 1 o 2 frases prácticas resumiendo si el entorno es favorable, neutro o exigente para este jugador hoy y en qué rubro tiene más techo o riesgo.
+
 REGLAS ESTRICTAS:
-1. Cita ÚNICAMENTE números que aparezcan exactamente en el JSON de `ml_result` (proyecciones base, escenario, deltas, factores SHAP, `opponent_defense` e historial WOWY).
-2. NUNCA inventes estadísticas, promedios ni porcentajes que no estén en el JSON.
-3. Menciona el perfil defensivo del rival (DefRtg y su ranking #1-#30 si está disponible), bajas del rival si existen, principales factores SHAP y el historial WOWY real si existe.
-4. Si la diferencia entre base y escenario es pequeña, explícalo con honestidad."""
+1. Cita ÚNICAMENTE números que aparezcan en el JSON de `ml_result` (proyecciones base, escenario, deltas, `opponent_defense`, factores SHAP e historial WOWY).
+2. NUNCA inventes estadísticas, promedios ni porcentajes que no estén en el JSON."""
 
 FEATURE_LABELS_ES: dict[str, str] = {
     "pred_min": "Minutos proyectados",

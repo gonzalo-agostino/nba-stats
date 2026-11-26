@@ -8,6 +8,7 @@ import {
   type TeamBoxscoreRow,
   type TeamSimulationResponse,
 } from "@/lib/api";
+import { AiAnalysisBlock } from "@/components/AiAnalysisBlock";
 import { PlayerAvatar } from "@/components/PlayerAvatar";
 import { cn, formatSigned, humanizeFeature } from "@/lib/utils";
 
@@ -285,14 +286,12 @@ export function PlayerDetailModal({
               {aiError ? <div className="text-xs text-rose-500">{aiError}</div> : null}
 
               {aiResponse ? (
-                <div className="border-t border-[var(--border-hairline)] pt-2.5 text-xs leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
-                  <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-[var(--text-secondary)]">
-                    <span>Análisis del modelo</span>
-                    {aiResponse.verification_passed ? (
-                      <span className="text-emerald-600 dark:text-emerald-400">· Verificado</span>
-                    ) : null}
-                  </div>
-                  {aiResponse.analysis}
+                <div className="border-t border-[var(--border-hairline)] pt-2.5">
+                  <AiAnalysisBlock
+                    text={aiResponse.analysis}
+                    verified={aiResponse.verification_passed}
+                    compact
+                  />
                 </div>
               ) : null}
             </section>

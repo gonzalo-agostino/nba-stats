@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -19,6 +19,7 @@ import {
   type PropBoardItem,
   type PropBoardResponse,
 } from "@/lib/api";
+import { AiAnalysisBlock } from "@/components/AiAnalysisBlock";
 import { PlayerAvatar } from "@/components/PlayerAvatar";
 import { PropBarChart } from "@/components/PropBarChart";
 import { cn, formatSigned } from "@/lib/utils";
@@ -53,9 +54,10 @@ function hitRateColor(pct: number): string {
 
 interface PropsBoardViewProps {
   activeDate?: string;
+  isActive?: boolean;
 }
 
-export function PropsBoardView({ activeDate }: PropsBoardViewProps) {
+export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewProps) {
   const [board, setBoard] = useState<PropBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [capturing, setCapturing] = useState(false);
@@ -69,6 +71,7 @@ export function PropsBoardView({ activeDate }: PropsBoardViewProps) {
 
   // Selected Prop & Interactive Evidence State
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [windowSize, setWindowSize] = useState<5 | 10 | 15 | 20>(10);
   const [customLine, setCustomLine] = useState<number | null>(null);
   const [customSide, setCustomSide] = useState<"OVER" | "UNDER" | null>(null);
@@ -141,6 +144,31 @@ export function PropsBoardView({ activeDate }: PropsBoardViewProps) {
 
   const selected: PropBoardItem | null =
     filteredItems.find((i) => i.id === selectedId) ?? filteredItems[0] ?? null;
+
+  // Keyboard navigation (ArrowUp / ArrowDown) through the filtered props list
+  useEffect(() => {
+    if (!isActive) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (filteredItems.length === 0) return;
+
+      e.preventDefault();
+      const currIdx = selected ? filteredItems.findIndex((i) => i.id === selected.id) : -1;
+      const nextIdx =
+        e.key === "ArrowDown"
+          ? Math.min(filteredItems.length - 1, currIdx + 1)
+          : Math.max(0, currIdx - 1);
+      const nextItem = filteredItems[nextIdx];
+      if (nextItem) {
+        setSelectedId(nextItem.id);
+        itemRefs.current[nextItem.id]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [filteredItems, selected, isActive]);
 
   // Reset interactive overrides when selecting a different prop
   useEffect(() => {
@@ -386,6 +414,9 @@ export function PropsBoardView({ activeDate }: PropsBoardViewProps) {
                 return (
                   <button
                     key={item.id}
+                    ref={(el) => {
+                      itemRefs.current[item.id] = el;
+                    }}
                     type="button"
                     onClick={() => setSelectedId(item.id)}
                     className={cn(
@@ -731,9 +762,11 @@ export function PropsBoardView({ activeDate }: PropsBoardViewProps) {
 
               {aiError ? <div className="text-xs text-rose-500">{aiError}</div> : null}
               {aiResp ? (
-                <div className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] p-3 text-xs leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
-                  {aiResp.analysis}
-                </div>
+                <AiAnalysisBlock
+                  text={aiResp.analysis}
+                  verified={aiResp.verification_passed}
+                  compact
+                />
               ) : null}
             </div>
           ) : null}

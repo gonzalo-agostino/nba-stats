@@ -29,6 +29,7 @@ import {
   type TeamItem,
   type TeamSimulationResponse,
 } from "@/lib/api";
+import { AiAnalysisBlock } from "@/components/AiAnalysisBlock";
 import { PlayerAvatar } from "@/components/PlayerAvatar";
 import { PerformanceView } from "@/components/PerformanceView";
 import { PlayerDetailModal } from "@/components/PlayerDetailModal";
@@ -576,39 +577,41 @@ export function App() {
             </div>
           ) : null}
           {globalAiResp ? (
-            <div className="mt-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-3.5 py-2.5 text-xs">
-              <div className="mb-1.5 flex items-center justify-between">
+            <div className="mt-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-3.5 text-xs">
+              <div className="mb-2 flex items-center justify-between">
                 <span className="font-semibold text-[var(--text-secondary)]">
-                  Respuesta del Agente LangGraph{" "}
-                  {globalAiResp.verification_passed ? (
-                    <span className="ml-1 font-medium text-emerald-600 dark:text-emerald-400">
-                      · Verificado
-                    </span>
-                  ) : null}
+                  Análisis del Agente LangGraph
                 </span>
                 <button
                   type="button"
                   onClick={() => setGlobalAiResp(null)}
+                  aria-label="Cerrar respuesta IA"
                   className="text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
-              <div className="leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
-                {globalAiResp.clarification_message ||
+              <AiAnalysisBlock
+                text={
+                  globalAiResp.clarification_message ||
                   globalAiResp.analysis ||
-                  globalAiResp.final_response}
-              </div>
+                  globalAiResp.final_response
+                }
+                verified={globalAiResp.verification_passed}
+                mlResult={globalAiResp.ml_result}
+              />
             </div>
           ) : null}
         </div>
 
-        {/* Main Content: Visual Props Board (default) OR Boxscore OR Win Rate */}
-        {activeTab === "props" ? (
-          <PropsBoardView activeDate={slateDate || undefined} />
-        ) : activeTab === "performance" ? (
+        {/* Main Content: Keep Props mounted for instant tab switching without re-fetching */}
+        <div className={activeTab === "props" ? "" : "hidden"}>
+          <PropsBoardView activeDate={slateDate || undefined} isActive={activeTab === "props"} />
+        </div>
+
+        {activeTab === "performance" ? (
           <PerformanceView activeDate={slateDate || undefined} />
-        ) : (
+        ) : activeTab === "games" ? (
         <>
         {/* 2. Date Picker + Slate Games Strip */}
         <section className="mb-4 flex items-center gap-2 overflow-x-auto pb-1">
@@ -977,7 +980,7 @@ export function App() {
           </div>
         )}
         </>
-        )}
+        ) : null}
       </div>
 
       {/* Dedicated Player Detail Modal (headshot, 13 stats, splits, 15 game logs, AI) */}
