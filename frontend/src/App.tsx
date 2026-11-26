@@ -32,6 +32,7 @@ import {
 import { PlayerAvatar } from "@/components/PlayerAvatar";
 import { PerformanceView } from "@/components/PerformanceView";
 import { PlayerDetailModal } from "@/components/PlayerDetailModal";
+import { PropsBoardView } from "@/components/PropsBoardView";
 import { TeamBoxscoreTable, type StatViewMode } from "@/components/TeamBoxscoreTable";
 import { cn } from "@/lib/utils";
 
@@ -43,7 +44,7 @@ function shiftIsoDate(isoDate: string, deltaDays: number): string {
 
 export function App() {
   const [darkMode, setDarkMode] = useState(true);
-  const [activeTab, setActiveTab] = useState<"games" | "performance">("games");
+  const [activeTab, setActiveTab] = useState<"props" | "games" | "performance">("props");
   const [teams, setTeams] = useState<TeamItem[]>([]);
   const [latestGameDate, setLatestGameDate] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -391,6 +392,18 @@ export function App() {
             <div className="inline-flex h-9 shrink-0 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-0.5 text-xs">
               <button
                 type="button"
+                onClick={() => setActiveTab("props")}
+                className={cn(
+                  "rounded px-2.5 font-medium transition-colors cursor-pointer",
+                  activeTab === "props"
+                    ? "bg-amber-500 text-slate-950 font-semibold"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                )}
+              >
+                Props
+              </button>
+              <button
+                type="button"
                 onClick={() => setActiveTab("games")}
                 className={cn(
                   "rounded px-2.5 font-medium transition-colors cursor-pointer",
@@ -399,7 +412,7 @@ export function App() {
                     : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                 )}
               >
-                Partidos
+                Boxscore
               </button>
               <button
                 type="button"
@@ -590,8 +603,10 @@ export function App() {
           ) : null}
         </div>
 
-        {/* Main Content: Games Boxscore OR Automated Win Rate / ROI View */}
-        {activeTab === "performance" ? (
+        {/* Main Content: Visual Props Board (default) OR Boxscore OR Win Rate */}
+        {activeTab === "props" ? (
+          <PropsBoardView activeDate={slateDate || undefined} />
+        ) : activeTab === "performance" ? (
           <PerformanceView activeDate={slateDate || undefined} />
         ) : (
         <>

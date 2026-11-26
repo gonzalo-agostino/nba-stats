@@ -77,9 +77,6 @@ class OddsService:
         init_schema(con)
         return con
 
-    def _connect_ro(self) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(str(self.duckdb_path), read_only=True)
-
     def _update_quota_headers(self, resp: requests.Response) -> None:
         rem = resp.headers.get("x-requests-remaining")
         used = resp.headers.get("x-requests-used")
@@ -129,6 +126,139 @@ class OddsService:
         self._update_quota_headers(resp)
         resp.raise_for_status()
         return resp.json()
+
+    def _fetch_game_odds_raw(self) -> list[dict[str, Any]]:
+        """Fetch NBA game spreads & totals for all upcoming games (2 credits total for entire slate)."""
+        if not self.api_key:
+            raise ValueError("Falta configurar THE_ODDS_API_KEY en el archivo .env.")
+        resp = requests.get(
+            f"{ODDS_API_BASE}/odds",
+            params={
+                "apiKey": self.api_key,
+                "regions": "us",
+                "markets": "spreads,totals",
+                "oddsFormat": "decimal",
+            },
+            timeout=15,
+        )
+        self._update_quota_headers(resp)
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else []
+
+    def fetch_and_cache_game_odds(
+        self,
+        target_date: date,
+        force_refresh: bool = False,
+    ) -> int:
+        """Fetch and cache Vegas spreads & totals for target_date in DuckDB game_odds."""
+        with self._connect_rw() as con:
+            existing = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM game_odds WHERE game_date = ?",
+                    [target_date],
+                ).fetchall()[0][0]
+            )
+            if existing > 0 and not force_refresh:
+                return existing
+
+        try:
+            events = self._fetch_game_odds_raw()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed fetching NBA game spreads/totals: %s", exc)
+            return 0
+
+        now_ts = datetime.now(UTC).replace(tzinfo=None)
+        rows: list[tuple[Any, ...]] = []
+        for ev in events:
+            ev_date = self._event_local_date(str(ev.get("commence_time") or ""))
+            if ev_date != target_date:
+                continue
+            event_id = str(ev.get("id") or "")
+            home_team = str(ev.get("home_team") or "")
+            away_team = str(ev.get("away_team") or "")
+            bookmakers = ev.get("bookmakers") or []
+            bookmakers_sorted = sorted(
+                bookmakers,
+                key=lambda b: (
+                    PREFERRED_BOOKMAKERS.index(str(b.get("key") or "").lower())
+                    if str(b.get("key") or "").lower() in PREFERRED_BOOKMAKERS
+                    else 99
+                ),
+            )
+            spread_home: float | None = None
+            spread_away: float | None = None
+            total_points: float | None = None
+            chosen_bm = "consensus"
+            for bm in bookmakers_sorted:
+                chosen_bm = str(bm.get("key") or "consensus").lower()
+                for m in bm.get("markets") or []:
+                    mkey = str(m.get("key") or "")
+                    if mkey == "spreads" and spread_home is None:
+                        for o in m.get("outcomes") or []:
+                            if o.get("name") == home_team and o.get("point") is not None:
+                                spread_home = float(o["point"])
+                            elif o.get("name") == away_team and o.get("point") is not None:
+                                spread_away = float(o["point"])
+                    elif mkey == "totals" and total_points is None:
+                        for o in m.get("outcomes") or []:
+                            if o.get("point") is not None:
+                                total_points = float(o["point"])
+                                break
+                if spread_home is not None and total_points is not None:
+                    break
+            if event_id and (spread_home is not None or total_points is not None):
+                rows.append(
+                    (
+                        target_date,
+                        event_id,
+                        home_team,
+                        away_team,
+                        chosen_bm,
+                        spread_home,
+                        spread_away,
+                        total_points,
+                        now_ts,
+                    )
+                )
+
+        if rows:
+            with self._connect_rw() as con:
+                con.executemany(
+                    """
+                    INSERT OR REPLACE INTO game_odds (
+                        game_date, event_id, home_team, away_team, bookmaker,
+                        spread_home, spread_away, total_points, fetched_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+        return len(rows)
+
+    def get_game_odds_for_date(self, target_date: date) -> dict[str, dict[str, Any]]:
+        """Return cached spreads & totals indexed by event_id and normalized team full name."""
+        with self._connect_rw() as con:
+            rows = con.execute(
+                """
+                SELECT event_id, home_team, away_team, bookmaker, spread_home, spread_away, total_points
+                FROM game_odds
+                WHERE game_date = ?
+                """,
+                [target_date],
+            ).fetchall()
+        by_event: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            rec = {
+                "event_id": str(r[0]),
+                "home_team": str(r[1]),
+                "away_team": str(r[2]),
+                "bookmaker": str(r[3]),
+                "spread_home": float(r[4]) if r[4] is not None else None,
+                "spread_away": float(r[5]) if r[5] is not None else None,
+                "total_points": float(r[6]) if r[6] is not None else None,
+            }
+            by_event[rec["event_id"]] = rec
+        return by_event
 
     def _event_local_date(self, commence_time_iso: str) -> date | None:
         """Convert UTC ISO commence_time to US Eastern NBA schedule date (UTC-5)."""
@@ -313,6 +443,9 @@ class OddsService:
             markets=markets,
             force_refresh=force_refresh,
         )
+        # Also cache Vegas spreads & totals (2 credits total for the whole slate, 0 if cached)
+        if self.api_key:
+            self.fetch_and_cache_game_odds(target_date=ref_date, force_refresh=force_refresh)
         lines = self.get_lines_for_date(ref_date)
 
         # Index lines by (player_name_norm) -> list[line_dict]
@@ -668,4 +801,384 @@ class OddsService:
             "by_edge_bucket": by_edge_bucket,
             "requests_remaining": self.requests_remaining,
             "picks": picks,
+        }
+
+    @staticmethod
+    def _extract_log_stat(row: tuple[Any, ...], stat: str) -> float:
+        # row: (game_id, game_date, opp_abbr, is_home, wl, min, pts, reb, ast, stl, blk, tov)
+        pts = float(row[6] or 0.0)
+        reb = float(row[7] or 0.0)
+        ast = float(row[8] or 0.0)
+        stl = float(row[9] or 0.0)
+        blk = float(row[10] or 0.0)
+        tov = float(row[11] or 0.0)
+        m_min = float(row[5] or 0.0)
+        mapping = {
+            "min": m_min,
+            "pts": pts,
+            "reb": reb,
+            "ast": ast,
+            "pra": pts + reb + ast,
+            "pr": pts + reb,
+            "pa": pts + ast,
+            "ra": reb + ast,
+            "stl": stl,
+            "blk": blk,
+            "tov": tov,
+        }
+        return round(mapping.get(stat, 0.0), 1)
+
+    def get_player_chart_data(
+        self,
+        player_id: int,
+        stat: str,
+        line: float,
+        side: str = "OVER",
+        without_player_id: int | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Return recent game logs and exact Hit Rates for a player/stat/line with optional WOWY filter."""
+        with self._connect_rw() as con:
+            if without_player_id is not None:
+                # Games played by target player where without_player_id did NOT play (>0 min) on same team
+                rows = con.execute(
+                    """
+                    WITH played_other AS (
+                        SELECT DISTINCT game_id
+                        FROM player_game_logs
+                        WHERE player_id = ? AND COALESCE(min, 0) > 0
+                    )
+                    SELECT
+                        l.game_id,
+                        CAST(l.game_date AS VARCHAR),
+                        COALESCE(opp.abbreviation, 'OPP'),
+                        COALESCE(l.is_home, false),
+                        l.wl,
+                        COALESCE(l.min, 0.0),
+                        COALESCE(l.pts, 0.0),
+                        COALESCE(l.reb, 0.0),
+                        COALESCE(l.ast, 0.0),
+                        COALESCE(l.stl, 0.0),
+                        COALESCE(l.blk, 0.0),
+                        COALESCE(l.tov, 0.0)
+                    FROM player_game_logs l
+                    LEFT JOIN teams opp ON l.opp_team_id = opp.team_id
+                    LEFT JOIN played_other po ON l.game_id = po.game_id
+                    WHERE l.player_id = ?
+                      AND COALESCE(l.min, 0) > 0
+                      AND po.game_id IS NULL
+                    ORDER BY l.game_date DESC, l.game_id DESC
+                    LIMIT ?
+                    """,
+                    [without_player_id, player_id, limit],
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    """
+                    SELECT
+                        l.game_id,
+                        CAST(l.game_date AS VARCHAR),
+                        COALESCE(opp.abbreviation, 'OPP'),
+                        COALESCE(l.is_home, false),
+                        l.wl,
+                        COALESCE(l.min, 0.0),
+                        COALESCE(l.pts, 0.0),
+                        COALESCE(l.reb, 0.0),
+                        COALESCE(l.ast, 0.0),
+                        COALESCE(l.stl, 0.0),
+                        COALESCE(l.blk, 0.0),
+                        COALESCE(l.tov, 0.0)
+                    FROM player_game_logs l
+                    LEFT JOIN teams opp ON l.opp_team_id = opp.team_id
+                    WHERE l.player_id = ?
+                      AND COALESCE(l.min, 0) > 0
+                    ORDER BY l.game_date DESC, l.game_id DESC
+                    LIMIT ?
+                    """,
+                    [player_id, limit],
+                ).fetchall()
+
+        side_upper = side.upper()
+        games: list[dict[str, Any]] = []
+        for r in rows:
+            val = self._extract_log_stat(r, stat)
+            hit = (val > line) if side_upper == "OVER" else (val < line)
+            games.append(
+                {
+                    "game_id": str(r[0]),
+                    "game_date": str(r[1])[:10],
+                    "opp_abbr": str(r[2]),
+                    "is_home": bool(r[3]),
+                    "wl": str(r[4]) if r[4] is not None else None,
+                    "min": round(float(r[5] or 0.0), 1),
+                    "value": val,
+                    "hit": hit,
+                }
+            )
+
+        def _hr(sub: list[dict[str, Any]]) -> dict[str, Any]:
+            n = len(sub)
+            hits = sum(1 for g in sub if g["hit"])
+            avg_val = round(sum(g["value"] for g in sub) / n, 1) if n > 0 else 0.0
+            avg_min = round(sum(g["min"] for g in sub) / n, 1) if n > 0 else 0.0
+            return {
+                "hits": hits,
+                "total": n,
+                "pct": round((hits / n) * 100.0, 1) if n > 0 else 0.0,
+                "avg": avg_val,
+                "avg_min": avg_min,
+            }
+
+        return {
+            "player_id": player_id,
+            "stat": stat,
+            "line": line,
+            "side": side_upper,
+            "without_player_id": without_player_id,
+            "l5": _hr(games[:5]),
+            "l10": _hr(games[:10]),
+            "l20": _hr(games[:20]),
+            "home": _hr([g for g in games if g["is_home"]]),
+            "away": _hr([g for g in games if not g["is_home"]]),
+            # Chronological order (oldest -> newest) for left-to-right bar chart
+            "games": list(reversed(games)),
+        }
+
+    def build_prop_board(
+        self,
+        simulator: WhatIfSimulator,
+        slate_service: SlateService,
+        injury_service: InjuryService,
+        game_date_str: str | None = None,
+    ) -> dict[str, Any]:
+        """Build the visual Outlier-style Prop Board using cached lines, game logs, Spread/Total, and ML."""
+        slate = slate_service.get_today_slate(game_date=game_date_str)
+        ref_date = date.fromisoformat(str(slate["game_date"])[:10])
+        games = slate.get("games") or []
+        lines = self.get_lines_for_date(ref_date)
+        game_odds_by_event = self.get_game_odds_for_date(ref_date)
+
+        # Index lines by player_name_norm
+        lines_by_player: dict[str, list[dict[str, Any]]] = {}
+        for ln in lines:
+            lines_by_player.setdefault(ln["player_name_norm"], []).append(ln)
+
+        inj_data = injury_service.get_injuries()
+        by_name: dict[str, dict[str, str]] = inj_data.get("by_name") or {}
+
+        # Fetch all recent 20 logs in one query for matched players after simulating teams
+        board_items: list[dict[str, Any]] = []
+        game_meta_list: list[dict[str, Any]] = []
+
+        for g in games:
+            away_id = int(g["away_team_id"])
+            home_id = int(g["home_team_id"])
+            away_abbr = str(g["away_abbr"])
+            home_abbr = str(g["home_abbr"])
+            game_id = str(g["game_id"])
+
+            # Run fast cached team simulations with ESPN OUT players
+            away_init = simulator.simulate_team(
+                team_id=away_id,
+                opponent_team_id=home_id,
+                out_player_ids=[],
+                is_back_to_back=bool(g.get("away_b2b", False)),
+                is_home=False,
+                limit=10,
+            )
+            home_init = simulator.simulate_team(
+                team_id=home_id,
+                opponent_team_id=away_id,
+                out_player_ids=[],
+                is_back_to_back=bool(g.get("home_b2b", False)),
+                is_home=True,
+                limit=10,
+            )
+            away_outs = [
+                int(r["player_id"])
+                for r in away_init["rows"]
+                if (by_name.get(normalize_name(str(r["player_name"]))) or {}).get("status") == "OUT"
+            ]
+            home_outs = [
+                int(r["player_id"])
+                for r in home_init["rows"]
+                if (by_name.get(normalize_name(str(r["player_name"]))) or {}).get("status") == "OUT"
+            ]
+
+            away_sim = simulator.simulate_team(
+                team_id=away_id,
+                opponent_team_id=home_id,
+                out_player_ids=away_outs,
+                opponent_out_player_ids=home_outs,
+                is_back_to_back=bool(g.get("away_b2b", False)),
+                is_home=False,
+                limit=10,
+            )
+            home_sim = simulator.simulate_team(
+                team_id=home_id,
+                opponent_team_id=away_id,
+                out_player_ids=home_outs,
+                opponent_out_player_ids=away_outs,
+                is_back_to_back=bool(g.get("home_b2b", False)),
+                is_home=True,
+                limit=10,
+            )
+
+            game_meta_list.append(
+                {
+                    "game_id": game_id,
+                    "away_abbr": away_abbr,
+                    "home_abbr": home_abbr,
+                    "game_status": str(g.get("game_status") or ""),
+                }
+            )
+
+            for payload, is_home_side in ((away_sim, False), (home_sim, True)):
+                team_abbr = str(payload["team_abbreviation"])
+                opp_abbr = str(payload["opponent_abbreviation"])
+                opp_def = payload.get("opponent_defense")
+                teammates = [
+                    {
+                        "player_id": int(r["player_id"]),
+                        "player_name": str(r["player_name"]),
+                        "is_out": bool(r["is_out"]),
+                    }
+                    for r in payload["rows"][:7]
+                ]
+                out_names = [t["player_name"] for t in teammates if t["is_out"]]
+
+                for row in payload["rows"]:
+                    if row["is_out"] or row["scenario"] is None:
+                        continue
+                    pid = int(row["player_id"])
+                    p_name = str(row["player_name"])
+                    p_norm = normalize_name(p_name)
+                    p_lines = lines_by_player.get(p_norm)
+                    if not p_lines:
+                        continue
+
+                    inj_rec = by_name.get(p_norm)
+                    scen = row["scenario"]
+
+                    for ln in p_lines:
+                        stat = ln["stat"]
+                        if not hasattr(scen, stat):
+                            continue
+                        line_val = float(ln["line"])
+                        ml_proj = round(float(getattr(scen, stat)), 1)
+                        ml_edge = round(ml_proj - line_val, 1)
+
+                        # Compute real historical Hit Rates from DuckDB
+                        over_chart = self.get_player_chart_data(
+                            player_id=pid,
+                            stat=stat,
+                            line=line_val,
+                            side="OVER",
+                            limit=20,
+                        )
+                        l10_over_pct = float(over_chart["l10"]["pct"])
+                        l10_under_pct = round(100.0 - l10_over_pct, 1) if over_chart["l10"]["total"] > 0 else 0.0
+
+                        # Pick dominant recommended side based on real Hit Rate L10 (tie-break by ML edge)
+                        if l10_over_pct > l10_under_pct:
+                            rec_side = "OVER"
+                        elif l10_under_pct > l10_over_pct:
+                            rec_side = "UNDER"
+                        else:
+                            rec_side = "OVER" if ml_edge >= 0 else "UNDER"
+
+                        chart = (
+                            over_chart
+                            if rec_side == "OVER"
+                            else self.get_player_chart_data(
+                                player_id=pid,
+                                stat=stat,
+                                line=line_val,
+                                side="UNDER",
+                                limit=20,
+                            )
+                        )
+
+                        odds_dec = (
+                            ln["over_odds"] if rec_side == "OVER" else ln["under_odds"]
+                        )
+                        if odds_dec is None or odds_dec <= 1.01:
+                            odds_dec = 1.87
+
+                        ml_agrees = (rec_side == "OVER" and ml_edge > 0.3) or (
+                            rec_side == "UNDER" and ml_edge < -0.3
+                        )
+
+                        # Vegas game odds (spread & total)
+                        ev_odds = game_odds_by_event.get(ln["event_id"])
+                        team_spread: float | None = None
+                        game_total: float | None = None
+                        if ev_odds:
+                            team_spread = (
+                                ev_odds["spread_home"] if is_home_side else ev_odds["spread_away"]
+                            )
+                            game_total = ev_odds["total_points"]
+                        blowout_risk = team_spread is not None and abs(team_spread) >= 11.5
+
+                        # Transparent Conviction Score (0-100): real trend + ML agreement - blowout penalty
+                        hr10 = float(chart["l10"]["pct"])
+                        hr5 = float(chart["l5"]["pct"])
+                        score = 0.55 * hr10 + 0.25 * hr5 + (15.0 if ml_agrees else 0.0)
+                        if blowout_risk and rec_side == "OVER":
+                            score -= 10.0
+                        conviction = round(max(0.0, min(100.0, score)))
+
+                        board_items.append(
+                            {
+                                "id": f"{ref_date.isoformat()}_{pid}_{stat}",
+                                "game_id": game_id,
+                                "game_date": ref_date.isoformat(),
+                                "player_id": pid,
+                                "player_name": p_name,
+                                "pos_group": str(row["pos_group"]),
+                                "team_abbreviation": team_abbr,
+                                "opponent_abbreviation": opp_abbr,
+                                "is_home": is_home_side,
+                                "is_back_to_back": bool(payload["is_back_to_back"]),
+                                "injury_status": inj_rec["status"] if inj_rec else None,
+                                "injury_note": inj_rec["comment"] if inj_rec else None,
+                                "team_outs": out_names,
+                                "stat": stat,
+                                "bookmaker": ln["bookmaker"],
+                                "line": line_val,
+                                "recommended_side": rec_side,
+                                "odds_decimal": round(float(odds_dec), 2),
+                                "over_odds": ln["over_odds"],
+                                "under_odds": ln["under_odds"],
+                                "ml_projection": ml_proj,
+                                "ml_edge": ml_edge,
+                                "ml_agrees": ml_agrees,
+                                "conviction_score": conviction,
+                                "team_spread": team_spread,
+                                "game_total": game_total,
+                                "blowout_risk": blowout_risk,
+                                "opp_def_rank": opp_def.def_rating_rank if opp_def else None,
+                                "opp_def_rating_10": opp_def.def_rating_10 if opp_def else None,
+                                "opp_pace_rank": opp_def.pace_rank if opp_def else None,
+                                "l5": chart["l5"],
+                                "l10": chart["l10"],
+                                "l20": chart["l20"],
+                                "home_split": chart["home"],
+                                "away_split": chart["away"],
+                                "games": chart["games"],
+                                "teammates": [t for t in teammates if t["player_id"] != pid],
+                            }
+                        )
+
+        board_items.sort(
+            key=lambda x: (x["conviction_score"], x["l10"]["pct"], abs(x["ml_edge"])),
+            reverse=True,
+        )
+
+        return {
+            "game_date": ref_date.isoformat(),
+            "games": game_meta_list,
+            "total_props": len(board_items),
+            "requests_remaining": self.requests_remaining,
+            "items": board_items,
         }

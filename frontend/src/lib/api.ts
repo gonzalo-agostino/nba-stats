@@ -446,6 +446,119 @@ export function gradeTrackedPicks(): Promise<{
   return requestJson(`/api/v1/props/grade`, { method: "POST" });
 }
 
+export interface HitRateSummary {
+  hits: number;
+  total: number;
+  pct: number;
+  avg: number;
+  avg_min: number;
+}
+
+export interface PropGamePoint {
+  game_id: string;
+  game_date: string;
+  opp_abbr: string;
+  is_home: boolean;
+  wl: string | null;
+  min: number;
+  value: number;
+  hit: boolean;
+}
+
+export interface PropTeammateOption {
+  player_id: number;
+  player_name: string;
+  is_out: boolean;
+}
+
+export interface PropBoardItem {
+  id: string;
+  game_id: string;
+  game_date: string;
+  player_id: number;
+  player_name: string;
+  pos_group: string;
+  team_abbreviation: string;
+  opponent_abbreviation: string;
+  is_home: boolean;
+  is_back_to_back: boolean;
+  injury_status: "OUT" | "DTD" | null;
+  injury_note: string | null;
+  team_outs: string[];
+  stat: string;
+  bookmaker: string;
+  line: number;
+  recommended_side: "OVER" | "UNDER";
+  odds_decimal: number;
+  over_odds: number | null;
+  under_odds: number | null;
+  ml_projection: number;
+  ml_edge: number;
+  ml_agrees: boolean;
+  conviction_score: number;
+  team_spread: number | null;
+  game_total: number | null;
+  blowout_risk: boolean;
+  opp_def_rank: number | null;
+  opp_def_rating_10: number | null;
+  opp_pace_rank: number | null;
+  l5: HitRateSummary;
+  l10: HitRateSummary;
+  l20: HitRateSummary;
+  home_split: HitRateSummary;
+  away_split: HitRateSummary;
+  games: PropGamePoint[];
+  teammates: PropTeammateOption[];
+}
+
+export interface PropBoardResponse {
+  game_date: string;
+  games: { game_id: string; away_abbr: string; home_abbr: string; game_status: string }[];
+  total_props: number;
+  requests_remaining: number | null;
+  items: PropBoardItem[];
+}
+
+export interface PlayerChartResponse {
+  player_id: number;
+  stat: string;
+  line: number;
+  side: "OVER" | "UNDER";
+  without_player_id: number | null;
+  l5: HitRateSummary;
+  l10: HitRateSummary;
+  l20: HitRateSummary;
+  home: HitRateSummary;
+  away: HitRateSummary;
+  games: PropGamePoint[];
+}
+
+export function fetchPropBoard(gameDate?: string): Promise<PropBoardResponse> {
+  const qs = gameDate ? `?game_date=${encodeURIComponent(gameDate)}` : "";
+  return requestJson<PropBoardResponse>(`/api/v1/props/board${qs}`);
+}
+
+export function fetchPlayerChart(params: {
+  playerId: number;
+  stat: string;
+  line: number;
+  side: "OVER" | "UNDER";
+  withoutPlayerId?: number | null;
+  limit?: number;
+}): Promise<PlayerChartResponse> {
+  const sp = new URLSearchParams({
+    player_id: String(params.playerId),
+    stat: params.stat,
+    line: String(params.line),
+    side: params.side,
+    limit: String(params.limit ?? 20),
+  });
+  if (params.withoutPlayerId) {
+    sp.set("without_player_id", String(params.withoutPlayerId));
+  }
+  return requestJson<PlayerChartResponse>(`/api/v1/props/player-chart?${sp.toString()}`);
+}
+
 export function fetchPlayerProfile(playerId: number, limit = 15): Promise<PlayerProfileResponse> {
   return requestJson<PlayerProfileResponse>(`/api/v1/players/${playerId}/profile?limit=${limit}`);
 }

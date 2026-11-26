@@ -102,7 +102,7 @@ class WhatIfSimulator:
         self._base_proj_cache.clear()
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(str(self.duckdb_path), read_only=True)
+        return duckdb.connect(str(self.duckdb_path))
 
     def resolve_player(
         self,

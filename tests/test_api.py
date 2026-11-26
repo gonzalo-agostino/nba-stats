@@ -221,6 +221,33 @@ def test_api_endpoints_end_to_end(tmp_path: Path) -> None:
     assert exp_data["verification_passed"] is True
     assert "Nikola Jokić" in exp_data["analysis"]
 
+    # Visual Prop Board & Player Chart (with WOWY teammate filter)
+    board_resp = client.get("/api/v1/props/board")
+    assert board_resp.status_code == 200
+    assert "items" in board_resp.json()
+
+    chart_resp = client.get(
+        "/api/v1/props/player-chart",
+        params={"player_id": 102, "stat": "pts", "line": 15.5, "side": "OVER"},
+    )
+    assert chart_resp.status_code == 200
+    chart_data = chart_resp.json()
+    assert chart_data["l10"]["total"] > 0
+    assert len(chart_data["games"]) > 0
+
+    wowy_chart = client.get(
+        "/api/v1/props/player-chart",
+        params={
+            "player_id": 102,
+            "stat": "pts",
+            "line": 15.5,
+            "side": "OVER",
+            "without_player_id": 101,
+        },
+    )
+    assert wowy_chart.status_code == 200
+    assert wowy_chart.json()["without_player_id"] == 101
+
     # Ask LangGraph agent
     ask_resp = client.post(
         "/api/v1/ask",

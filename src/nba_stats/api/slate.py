@@ -61,7 +61,7 @@ class SlateService:
         if not self.duckdb_path.exists():
             return {}
         try:
-            with duckdb.connect(str(self.duckdb_path), read_only=True) as con:
+            with duckdb.connect(str(self.duckdb_path)) as con:
                 rows = con.execute("SELECT team_id, abbreviation FROM teams").fetchall()
             return {int(r[0]): str(r[1]) for r in rows}
         except duckdb.Error:
@@ -71,7 +71,7 @@ class SlateService:
         if not self.duckdb_path.exists():
             return []
         try:
-            with duckdb.connect(str(self.duckdb_path), read_only=True) as con:
+            with duckdb.connect(str(self.duckdb_path)) as con:
                 rows = con.execute(
                     """
                     SELECT
@@ -112,7 +112,7 @@ class SlateService:
         if not self.duckdb_path.exists():
             return set()
         try:
-            with duckdb.connect(str(self.duckdb_path), read_only=True) as con:
+            with duckdb.connect(str(self.duckdb_path)) as con:
                 rows = con.execute(
                     "SELECT DISTINCT team_id FROM team_game_logs WHERE game_date = ?",
                     [yesterday],

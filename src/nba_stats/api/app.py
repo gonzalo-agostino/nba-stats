@@ -85,7 +85,7 @@ def create_app(
         return state["agent_graph"]
 
     def _connect_db() -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(str(cfg.duckdb_path), read_only=True)
+        return duckdb.connect(str(cfg.duckdb_path))
 
     def _get_latest_game_date() -> str | None:
         if not cfg.duckdb_path.exists():
@@ -275,6 +275,39 @@ def create_app(
         """Return live Win Rate, ROI, net units, breakdowns, and tracked pick history."""
         svc: OddsService = state["odds_service"]
         return svc.get_performance_summary(limit=limit)
+
+    @app.get("/api/v1/props/board")
+    def get_props_board(
+        game_date: str | None = Query(default=None, description="Fecha YYYY-MM-DD opcional."),
+    ) -> dict[str, Any]:
+        """Return Outlier-style visual Prop Board (cached lines + Hit Rates + Spread/Total + ML)."""
+        svc: OddsService = state["odds_service"]
+        return svc.build_prop_board(
+            simulator=_get_simulator(),
+            slate_service=state["slate_service"],
+            injury_service=state["injury_service"],
+            game_date_str=game_date,
+        )
+
+    @app.get("/api/v1/props/player-chart")
+    def get_player_prop_chart(
+        player_id: int = Query(...),
+        stat: str = Query(...),
+        line: float = Query(...),
+        side: str = Query(default="OVER"),
+        without_player_id: int | None = Query(default=None),
+        limit: int = Query(default=20, ge=5, le=30),
+    ) -> dict[str, Any]:
+        """Recalculate real historical Hit Rates and bar chart for custom line or WOWY teammate filter."""
+        svc: OddsService = state["odds_service"]
+        return svc.get_player_chart_data(
+            player_id=player_id,
+            stat=stat,
+            line=line,
+            side=side,
+            without_player_id=without_player_id,
+            limit=limit,
+        )
 
     @app.get("/api/v1/slate/today", response_model=TodaySlateResponse)
     def get_today_slate(
