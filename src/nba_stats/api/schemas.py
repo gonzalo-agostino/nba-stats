@@ -138,3 +138,59 @@ class TodaySlateResponse(BaseModel):
     games: list[SlateGameItem] = Field(default_factory=list)
     fallback: bool = False
     cached: bool = False
+
+
+class ExplainResponse(BaseModel):
+    ml_result: SimulationResult
+    analysis: str
+    verification_passed: bool = False
+
+
+class PlayerGameLogItem(BaseModel):
+    game_id: str
+    game_date: str
+    opponent_abbreviation: str
+    is_home: bool
+    wl: str | None = None
+    min: float
+    pts: float
+    reb: float
+    ast: float
+    pra: float
+    stl: float
+    blk: float
+    tov: float
+    pf: float
+    fga: float
+    fg3a: float
+    ftm: float
+    fta: float
+    plus_minus: float
+    usg_pct: float | None = None
+    ts_pct: float | None = None
+
+
+class PlayerSplitsSummary(BaseModel):
+    label: str
+    games: int
+    min: float
+    pts: float
+    reb: float
+    ast: float
+    pra: float
+    stl: float
+    blk: float
+    tov: float
+    fga: float
+    ftm: float
+
+
+class PlayerProfileResponse(BaseModel):
+    player_id: int
+    full_name: str
+    team_id: int
+    team_abbreviation: str
+    pos_group: str
+    total_games: int
+    splits: list[PlayerSplitsSummary] = Field(default_factory=list)
+    recent_games: list[PlayerGameLogItem] = Field(default_factory=list)

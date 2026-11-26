@@ -282,11 +282,15 @@ player_base AS (
         STDDEV_SAMP(p.pts) OVER w10 AS pts_std_10,
         STDDEV_SAMP(p.reb) OVER w10 AS reb_std_10,
         STDDEV_SAMP(p.ast) OVER w10 AS ast_std_10,
-        -- Per-36 rates over last 10
+        -- Per-36 rates over last 10 (including discrete defensive/volume stats)
         36.0 * SUM(p.pts) OVER w10 / NULLIF(SUM(p.min) OVER w10, 0) AS pts_per36_10,
         36.0 * SUM(p.reb) OVER w10 / NULLIF(SUM(p.min) OVER w10, 0) AS reb_per36_10,
         36.0 * SUM(p.ast) OVER w10 / NULLIF(SUM(p.min) OVER w10, 0) AS ast_per36_10,
         36.0 * SUM(p.fga) OVER w10 / NULLIF(SUM(p.min) OVER w10, 0) AS fga_per36_10,
+        36.0 * SUM(p.stl) OVER w10 / NULLIF(SUM(p.min) OVER w10, 0) AS stl_per36_10,
+        36.0 * SUM(p.blk) OVER w10 / NULLIF(SUM(p.min) OVER w10, 0) AS blk_per36_10,
+        36.0 * SUM(p.fta) OVER w10 / NULLIF(SUM(p.min) OVER w10, 0) AS fta_per36_10,
+        36.0 * SUM(p.tov) OVER w10 / NULLIF(SUM(p.min) OVER w10, 0) AS tov_per36_10,
         -- Rolling 20
         AVG(p.min) OVER w20 AS min_avg_20,
         AVG(p.pts) OVER w20 AS pts_avg_20,
@@ -346,6 +350,11 @@ SELECT
         WHEN pb.prev_player_game_date IS NULL THEN 5
         ELSE LEAST(14, GREATEST(0, DATEDIFF('day', pb.prev_player_game_date, pb.game_date) - 1))
     END AS player_rest_days,
+    CASE
+        WHEN pb.prev_player_game_date IS NOT NULL
+         AND DATEDIFF('day', pb.prev_player_game_date, pb.game_date) - 1 >= 7 THEN 1
+        ELSE 0
+    END AS is_returning_from_absence,
     COALESCE(tc.games_in_last_7_days, 0) AS games_in_last_7_days,
     COALESCE(tc.games_in_last_14_days, 0) AS games_in_last_14_days,
     COALESCE(rt.road_trip_game_num, 0) AS road_trip_game_num,
@@ -390,6 +399,10 @@ SELECT
     pb.reb_per36_10,
     pb.ast_per36_10,
     pb.fga_per36_10,
+    pb.stl_per36_10,
+    pb.blk_per36_10,
+    pb.fta_per36_10,
+    pb.tov_per36_10,
     pb.min_avg_20,
     pb.pts_avg_20,
     pb.reb_avg_20,

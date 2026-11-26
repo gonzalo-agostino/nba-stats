@@ -51,6 +51,21 @@ def _allowed_values_for_stat(result: SimulationResult, stat: str) -> list[float]
     ]
     if stat == "min":
         allowed.append(result.missing_team_minutes)
+    if result.opponent_defense is not None:
+        od = result.opponent_defense
+        opp_map = {
+            "min": [od.opp_missing_minutes],
+            "pts": [od.pts_allowed_10, od.def_rating_10]
+            + ([od.dvp_pts_10] if od.dvp_pts_10 is not None else []),
+            "reb": [od.reb_allowed_10],
+            "ast": [od.ast_allowed_10],
+            "tov": [od.tov_forced_10],
+            "fga": [od.fg3a_allowed_10],
+            "stl": [od.opp_missing_def_stocks],
+            "blk": [od.opp_missing_def_stocks],
+        }
+        for val in opp_map.get(stat, []):
+            allowed.extend([val, abs(val)])
     if result.wowy_context is not None:
         wowy_map = {
             "min": [result.wowy_context.raw_delta_min, result.wowy_context.shrunk_delta_min],

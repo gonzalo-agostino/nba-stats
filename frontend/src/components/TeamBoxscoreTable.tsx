@@ -1,24 +1,61 @@
 import { Fragment, useState } from "react";
 import { Check, ChevronRight, Loader2, Sparkles } from "lucide-react";
-import type { AskResponse, TeamBoxscoreRow, TeamSimulationResponse } from "@/lib/api";
+import type {
+  ExplainResponse,
+  StatProjection,
+  TeamBoxscoreRow,
+  TeamSimulationResponse,
+} from "@/lib/api";
+import { PlayerAvatar } from "@/components/PlayerAvatar";
 import { cn, formatSigned, humanizeFeature } from "@/lib/utils";
 
-type EdgeStatKey = "pts" | "reb" | "ast" | "pra";
+export type StatViewMode = "main" | "extras" | "all";
+type EdgeStatKey = "pts" | "reb" | "ast" | "pra" | "stl" | "blk" | "tov";
 
 interface TeamBoxscoreTableProps {
   teamFullName: string;
   roleLabel: "Visitante" | "Local";
   data: TeamSimulationResponse;
+  statView: StatViewMode;
   isB2B: boolean;
   onToggleB2B: () => void;
   onToggleOut: (playerId: number) => void;
   expandedPlayerId: number | null;
   onToggleExpand: (playerId: number) => void;
+  onOpenPlayer: (row: TeamBoxscoreRow) => void;
   aiLoadingId: number | null;
-  aiByPlayer: Record<number, AskResponse>;
+  aiByPlayer: Record<number, ExplainResponse>;
   aiError: string | null;
   onExplainWithAI: (row: TeamBoxscoreRow, teamData: TeamSimulationResponse) => Promise<void>;
 }
+
+const EXTRAS_COLS: { key: keyof StatProjection; label: string; bold?: boolean }[] = [
+  { key: "min", label: "MIN" },
+  { key: "stl", label: "STL" },
+  { key: "blk", label: "BLK" },
+  { key: "tov", label: "TOV" },
+  { key: "pf", label: "PF" },
+  { key: "fga", label: "FGA" },
+  { key: "ftm", label: "FTM" },
+  { key: "pr", label: "PR" },
+  { key: "pa", label: "PA" },
+];
+
+const ALL_COLS: { key: keyof StatProjection; label: string; bold?: boolean }[] = [
+  { key: "min", label: "MIN" },
+  { key: "pts", label: "PTS" },
+  { key: "reb", label: "REB" },
+  { key: "ast", label: "AST" },
+  { key: "pra", label: "PRA", bold: true },
+  { key: "pr", label: "PR" },
+  { key: "pa", label: "PA" },
+  { key: "stl", label: "STL" },
+  { key: "blk", label: "BLK" },
+  { key: "tov", label: "TOV" },
+  { key: "pf", label: "PF" },
+  { key: "fga", label: "FGA" },
+  { key: "ftm", label: "FTM" },
+];
 
 function ProjCell({
   value,
@@ -60,11 +97,13 @@ export function TeamBoxscoreTable({
   teamFullName,
   roleLabel,
   data,
+  statView,
   isB2B,
   onToggleB2B,
   onToggleOut,
   expandedPlayerId,
   onToggleExpand,
+  onOpenPlayer,
   aiLoadingId,
   aiByPlayer,
   aiError,
@@ -72,8 +111,34 @@ export function TeamBoxscoreTable({
 }: TeamBoxscoreTableProps) {
   const [edgeStat, setEdgeStat] = useState<EdgeStatKey>("pts");
   const [edgeLineInput, setEdgeLineInput] = useState<string>("");
+  const [sortBy, setSortBy] = useState<keyof StatProjection | null>(null);
+  const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
+
+  function handleSort(key: keyof StatProjection) {
+    if (sortBy === key) {
+      if (sortDir === "desc") {
+        setSortDir("asc");
+      } else {
+        setSortBy(null);
+        setSortDir("desc");
+      }
+    } else {
+      setSortBy(key);
+      setSortDir("desc");
+    }
+  }
+
+  const sortedRows = sortBy
+    ? [...data.rows].sort((a, b) => {
+        if (a.is_out !== b.is_out) return a.is_out ? 1 : -1;
+        const av = a.scenario ? a.scenario[sortBy] : -1;
+        const bv = b.scenario ? b.scenario[sortBy] : -1;
+        return sortDir === "desc" ? bv - av : av - bv;
+      })
+    : data.rows;
 
   const hasOuts = data.rows.some((r) => r.is_out);
+  const totalCols = statView === "main" ? 10 : statView === "extras" ? 11 : 15;
 
   return (
     <div className="min-w-0">
@@ -100,49 +165,74 @@ export function TeamBoxscoreTable({
         </button>
       </div>
 
-      {/* Boxscore table: Base (10p) vs Proyectado (amber) */}
+      {/* Boxscore table */}
       <div className="overflow-x-auto">
         <table className="w-full border-collapse">
           <thead>
-            <tr className="text-[10px] font-medium">
-              <th colSpan={2} className="pb-1 text-left text-[var(--text-muted)]" />
-              <th
-                colSpan={3}
-                className="border-r border-[var(--border-hairline)] pb-1 text-center text-[var(--text-muted)]"
-              >
-                Base
-              </th>
-              <th colSpan={5} className="pb-1 text-center text-amber-600 dark:text-amber-400">
-                Proyectado{hasOuts ? " · con bajas" : ""}
-              </th>
-            </tr>
-            <tr className="border-b border-[var(--border-hairline)] text-[10px] font-medium text-[var(--text-muted)]">
-              <th className="w-7 px-1 py-1.5 text-center">OUT</th>
-              <th className="px-1.5 py-1.5 text-left">Jugador</th>
-              <th className="px-1.5 py-1.5 text-right">MIN</th>
-              <th className="px-1.5 py-1.5 text-right">PTS</th>
-              <th className="border-r border-[var(--border-hairline)] px-1.5 py-1.5 text-right">
-                PRA
-              </th>
-              <th className="px-1.5 py-1.5 text-right text-amber-600/80 dark:text-amber-400/80">
-                MIN
-              </th>
-              <th className="px-1.5 py-1.5 text-right text-amber-600/80 dark:text-amber-400/80">
-                PTS
-              </th>
-              <th className="px-1.5 py-1.5 text-right text-amber-600/80 dark:text-amber-400/80">
-                REB
-              </th>
-              <th className="px-1.5 py-1.5 text-right text-amber-600/80 dark:text-amber-400/80">
-                AST
-              </th>
-              <th className="px-1.5 py-1.5 text-right text-amber-600/80 dark:text-amber-400/80">
-                PRA
-              </th>
-            </tr>
+            {statView === "main" ? (
+              <>
+                <tr className="text-[10px] font-medium">
+                  <th colSpan={2} className="pb-1 text-left text-[var(--text-muted)]" />
+                  <th
+                    colSpan={3}
+                    className="border-r border-[var(--border-hairline)] pb-1 text-center text-[var(--text-muted)]"
+                  >
+                    Base
+                  </th>
+                  <th colSpan={5} className="pb-1 text-center text-amber-600 dark:text-amber-400">
+                    Proyectado{hasOuts ? " · con bajas" : ""}
+                  </th>
+                </tr>
+                <tr className="border-b border-[var(--border-hairline)] text-[10px] font-medium text-[var(--text-muted)]">
+                  <th className="w-7 px-1 py-1.5 text-center">OUT</th>
+                  <th className="px-1.5 py-1.5 text-left">Jugador</th>
+                  <th className="px-1.5 py-1.5 text-right">MIN</th>
+                  <th className="px-1.5 py-1.5 text-right">PTS</th>
+                  <th className="border-r border-[var(--border-hairline)] px-1.5 py-1.5 text-right">
+                    PRA
+                  </th>
+                  {(
+                    [
+                      { key: "min", label: "MIN" },
+                      { key: "pts", label: "PTS" },
+                      { key: "reb", label: "REB" },
+                      { key: "ast", label: "AST" },
+                      { key: "pra", label: "PRA" },
+                    ] as const
+                  ).map((col) => (
+                    <th
+                      key={col.key}
+                      onClick={() => handleSort(col.key)}
+                      title={`Ordenar por ${col.label}`}
+                      className="px-1.5 py-1.5 text-right text-amber-600/80 dark:text-amber-400/80 hover:text-amber-500 cursor-pointer select-none"
+                    >
+                      {col.label}
+                      {sortBy === col.key ? (sortDir === "desc" ? "↓" : "↑") : ""}
+                    </th>
+                  ))}
+                </tr>
+              </>
+            ) : (
+              <tr className="border-b border-[var(--border-hairline)] text-[10px] font-medium text-[var(--text-muted)]">
+                <th className="w-7 px-1 py-1.5 text-center">OUT</th>
+                <th className="px-1.5 py-1.5 text-left">Jugador</th>
+                {(statView === "extras" ? EXTRAS_COLS : ALL_COLS).map((col) => (
+                  <th
+                    key={col.key}
+                    onClick={() => handleSort(col.key)}
+                    title={`Ordenar por ${col.label}`}
+                    className="px-1.5 py-1.5 text-right text-amber-600/80 dark:text-amber-400/80 hover:text-amber-500 cursor-pointer select-none"
+                  >
+                    {col.label}
+                    {sortBy === col.key ? (sortDir === "desc" ? "↓" : "↑") : ""}
+                  </th>
+                ))}
+              </tr>
+            )}
           </thead>
+
           <tbody className="divide-y divide-[var(--border-hairline)]">
-            {data.rows.map((row) => {
+            {sortedRows.map((row) => {
               const isExpanded = expandedPlayerId === row.player_id && !row.is_out;
               const aiResp = aiByPlayer[row.player_id];
 
@@ -177,36 +267,48 @@ export function TeamBoxscoreTable({
                       </button>
                     </td>
 
-                    {/* Player Name + Position + Official Injury Badge */}
+                    {/* Player Avatar + Name (opens full profile) + quick-expand chevron */}
                     <td className="px-1.5 py-0 align-middle">
-                      <div className="flex flex-wrap items-center gap-1">
-                        <button
-                          type="button"
-                          disabled={row.is_out}
-                          onClick={() => {
-                            onToggleExpand(row.player_id);
-                            setEdgeLineInput("");
-                          }}
-                          className={cn(
-                            "inline-flex items-center gap-1 text-left text-xs font-medium text-[var(--text-primary)]",
-                            row.is_out
-                              ? "line-through cursor-default"
-                              : "hover:text-amber-500 cursor-pointer"
-                          )}
-                        >
-                          {!row.is_out ? (
+                      <div className="flex items-center gap-1.5">
+                        {!row.is_out ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onToggleExpand(row.player_id);
+                              setEdgeLineInput("");
+                            }}
+                            aria-label={`Desplegar resumen rápido de ${row.player_name}`}
+                            className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--text-muted)] hover:text-amber-500 cursor-pointer"
+                          >
                             <ChevronRight
                               className={cn(
-                                "h-3 w-3 shrink-0 text-[var(--text-muted)] transition-transform",
+                                "h-3 w-3 transition-transform",
                                 isExpanded && "rotate-90 text-amber-500"
                               )}
                             />
-                          ) : null}
-                          <span className="truncate max-w-[130px]">{row.player_name}</span>
+                          </button>
+                        ) : (
+                          <span className="w-4 shrink-0" />
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => onOpenPlayer(row)}
+                          className={cn(
+                            "inline-flex items-center gap-1.5 text-left text-xs font-medium text-[var(--text-primary)] cursor-pointer group",
+                            row.is_out && "line-through"
+                          )}
+                        >
+                          <PlayerAvatar playerId={row.player_id} name={row.player_name} size="sm" />
+                          <span className="truncate max-w-[115px] group-hover:text-amber-500 transition-colors">
+                            {row.player_name}
+                          </span>
                         </button>
+
                         <span className="num text-[10px] text-[var(--text-muted)]">
                           {row.pos_group}
                         </span>
+
                         {row.injury_status === "OUT" ? (
                           <span
                             title={row.injury_note ?? "Fuera"}
@@ -225,26 +327,35 @@ export function TeamBoxscoreTable({
                       </div>
                     </td>
 
-                    {/* Base (3 cols) + Proyectado (5 cols) */}
+                    {/* Stat Columns */}
                     {row.is_out || !row.base || !row.scenario || !row.deltas ? (
-                      <>
-                        <td className="num px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-muted)]">
-                          {row.ewma_min.toFixed(1)}
-                        </td>
-                        <td className="num px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-muted)]">
-                          —
-                        </td>
-                        <td className="num border-r border-[var(--border-hairline)] px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-muted)]">
-                          —
-                        </td>
+                      statView === "main" ? (
+                        <>
+                          <td className="num px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-muted)]">
+                            {row.ewma_min.toFixed(1)}
+                          </td>
+                          <td className="num px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-muted)]">
+                            —
+                          </td>
+                          <td className="num border-r border-[var(--border-hairline)] px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-muted)]">
+                            —
+                          </td>
+                          <td
+                            colSpan={5}
+                            className="px-2 py-0 text-left align-middle text-xs font-medium text-rose-500 dark:text-rose-400"
+                          >
+                            Baja
+                          </td>
+                        </>
+                      ) : (
                         <td
-                          colSpan={5}
+                          colSpan={statView === "extras" ? EXTRAS_COLS.length : ALL_COLS.length}
                           className="px-2 py-0 text-left align-middle text-xs font-medium text-rose-500 dark:text-rose-400"
                         >
                           Baja
                         </td>
-                      </>
-                    ) : (
+                      )
+                    ) : statView === "main" ? (
                       <>
                         <td className="num px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-secondary)]">
                           {row.base.min.toFixed(1)}
@@ -262,13 +373,22 @@ export function TeamBoxscoreTable({
                         <ProjCell value={row.scenario.ast} delta={row.deltas.ast} />
                         <ProjCell value={row.scenario.pra} delta={row.deltas.pra} bold />
                       </>
+                    ) : (
+                      (statView === "extras" ? EXTRAS_COLS : ALL_COLS).map((col) => (
+                        <ProjCell
+                          key={col.key}
+                          value={row.scenario![col.key]}
+                          delta={row.deltas![col.key]}
+                          bold={col.bold}
+                        />
+                      ))
                     )}
                   </tr>
 
-                  {/* Expandable Detail Row: SHAP + WOWY + Edge Comparator + AI */}
+                  {/* Quick Expandable Detail Row */}
                   {isExpanded && row.scenario ? (
                     <tr className="bg-[var(--bg-panel)]/80">
-                      <td colSpan={10} className="px-3 py-2.5">
+                      <td colSpan={totalCols} className="px-3 py-2.5">
                         <div className="space-y-2.5 text-xs">
                           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                             {/* Top 3 SHAP */}
@@ -322,13 +442,13 @@ export function TeamBoxscoreTable({
                               )}
                               <div className="num text-[10px] text-[var(--text-muted)]">
                                 STL {row.scenario.stl.toFixed(1)} · BLK {row.scenario.blk.toFixed(1)} · TOV{" "}
-                                {row.scenario.tov.toFixed(1)} · FGA {row.scenario.fga.toFixed(1)} · FTM{" "}
-                                {row.scenario.ftm.toFixed(1)}
+                                {row.scenario.tov.toFixed(1)} · PF {row.scenario.pf.toFixed(1)} · FGA{" "}
+                                {row.scenario.fga.toFixed(1)} · FTM {row.scenario.ftm.toFixed(1)}
                               </div>
                             </div>
                           </div>
 
-                          {/* Line Edge Comparator + Explain with AI */}
+                          {/* Line Edge Comparator + Open Profile + Explain with AI */}
                           <div className="flex flex-wrap items-center gap-1.5 border-t border-[var(--border-hairline)] pt-2">
                             <span className="text-[11px] text-[var(--text-muted)]">Línea:</span>
                             <select
@@ -341,6 +461,9 @@ export function TeamBoxscoreTable({
                               <option value="reb">REB</option>
                               <option value="ast">AST</option>
                               <option value="pra">PRA</option>
+                              <option value="stl">STL</option>
+                              <option value="blk">BLK</option>
+                              <option value="tov">TOV</option>
                             </select>
                             <input
                               type="number"
@@ -363,19 +486,28 @@ export function TeamBoxscoreTable({
                               </span>
                             ) : null}
 
-                            <button
-                              type="button"
-                              disabled={aiLoadingId !== null}
-                              onClick={() => void onExplainWithAI(row, data)}
-                              className="ml-auto inline-flex h-6 items-center gap-1 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2 text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-45 cursor-pointer"
-                            >
-                              {aiLoadingId === row.player_id ? (
-                                <Loader2 className="h-3 w-3 animate-spin" />
-                              ) : (
-                                <Sparkles className="h-3 w-3 text-[var(--accent)]" />
-                              )}
-                              Explicar con IA
-                            </button>
+                            <div className="ml-auto flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => onOpenPlayer(row)}
+                                className="inline-flex h-6 items-center rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2 text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                              >
+                                Ver perfil
+                              </button>
+                              <button
+                                type="button"
+                                disabled={aiLoadingId !== null}
+                                onClick={() => void onExplainWithAI(row, data)}
+                                className="inline-flex h-6 items-center gap-1 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2 text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-45 cursor-pointer"
+                              >
+                                {aiLoadingId === row.player_id ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <Sparkles className="h-3 w-3 text-[var(--accent)]" />
+                                )}
+                                Explicar con IA
+                              </button>
+                            </div>
                           </div>
 
                           {aiError && aiLoadingId === null ? (
@@ -384,7 +516,7 @@ export function TeamBoxscoreTable({
 
                           {aiResp ? (
                             <div className="border-t border-[var(--border-hairline)] pt-2 text-xs leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
-                              {aiResp.analysis || aiResp.final_response}
+                              {aiResp.analysis}
                             </div>
                           ) : null}
                         </div>

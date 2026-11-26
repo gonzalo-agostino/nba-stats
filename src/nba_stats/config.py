@@ -73,7 +73,6 @@ class TrainingConfig(BaseModel):
             "blk": "poisson",
             "tov": "poisson",
             "pf": "poisson",
-            "ftm": "poisson",
         }
     )
     validation: ValidationConfig = Field(default_factory=ValidationConfig)

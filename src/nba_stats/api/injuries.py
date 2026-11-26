@@ -26,11 +26,30 @@ ESPN_TO_NBA_ABBR: dict[str, str] = {
 }
 
 
+_NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+_FIRST_NAME_ALIASES: dict[str, str] = {
+    "nic": "nicolas",
+    "herb": "herbert",
+    "cam": "cameron",
+    "alex": "alexander",
+    "moe": "moritz",
+    "gg": "gregory",
+    "nahshon": "bones",
+    "svi": "sviatoslav",
+}
+
+
 def normalize_name(name: str) -> str:
-    """Lowercase and strip accents/diacritics for reliable cross-source player matching."""
+    """Normalize player names across ESPN and NBA Stats (accents, punctuation, suffixes, aliases)."""
     nfkd = unicodedata.normalize("NFKD", name)
     cleaned = "".join(ch for ch in nfkd if not unicodedata.combining(ch))
-    return " ".join(cleaned.lower().replace(".", "").split())
+    cleaned = cleaned.lower().replace(".", "").replace("'", "").replace("’", "").replace("-", " ")
+    tokens = [t for t in cleaned.split() if t]
+    while len(tokens) > 2 and tokens[-1] in _NAME_SUFFIXES:
+        tokens.pop()
+    if tokens and tokens[0] in _FIRST_NAME_ALIASES:
+        tokens[0] = _FIRST_NAME_ALIASES[tokens[0]]
+    return " ".join(tokens)
 
 
 def classify_injury_status(raw_status: str) -> str | None:

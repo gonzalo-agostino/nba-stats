@@ -13,11 +13,15 @@ import {
 } from "lucide-react";
 import {
   askAgent,
+  explainScenario,
+  fetchHealth,
   fetchTeams,
   fetchTodaySlate,
   searchPlayers,
   simulateGame,
+  syncWarehouse,
   type AskResponse,
+  type ExplainResponse,
   type GameSimulationResponse,
   type PlayerSearchItem,
   type SlateGameItem,
@@ -25,7 +29,9 @@ import {
   type TeamItem,
   type TeamSimulationResponse,
 } from "@/lib/api";
-import { TeamBoxscoreTable } from "@/components/TeamBoxscoreTable";
+import { PlayerAvatar } from "@/components/PlayerAvatar";
+import { PlayerDetailModal } from "@/components/PlayerDetailModal";
+import { TeamBoxscoreTable, type StatViewMode } from "@/components/TeamBoxscoreTable";
 import { cn } from "@/lib/utils";
 
 function shiftIsoDate(isoDate: string, deltaDays: number): string {
@@ -37,6 +43,8 @@ function shiftIsoDate(isoDate: string, deltaDays: number): string {
 export function App() {
   const [darkMode, setDarkMode] = useState(true);
   const [teams, setTeams] = useState<TeamItem[]>([]);
+  const [latestGameDate, setLatestGameDate] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
 
   // Slate & date navigation
   const [slateDate, setSlateDate] = useState<string>("");
@@ -70,10 +78,15 @@ export function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Per-row expandable details & AI
+  // Per-row expandable details, stat view, player detail modal & fast AI
+  const [statView, setStatView] = useState<StatViewMode>("main");
   const [expandedPlayerId, setExpandedPlayerId] = useState<number | null>(null);
+  const [modalPlayer, setModalPlayer] = useState<{
+    playerId: number;
+    side: "away" | "home";
+  } | null>(null);
   const [aiLoadingId, setAiLoadingId] = useState<number | null>(null);
-  const [aiByPlayer, setAiByPlayer] = useState<Record<number, AskResponse>>({});
+  const [aiByPlayer, setAiByPlayer] = useState<Record<number, ExplainResponse>>({});
   const [aiError, setAiError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -136,8 +149,12 @@ export function App() {
     }
   }
 
-  // Initial bootstrap: teams + today's slate
+  // Initial bootstrap: health + teams + today's slate
   useEffect(() => {
+    void fetchHealth()
+      .then((h) => setLatestGameDate(h.latest_game_date))
+      .catch(() => setLatestGameDate(null));
+
     void fetchTeams()
       .then((teamList) => {
         setTeams(teamList);
@@ -150,6 +167,21 @@ export function App() {
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function handleSyncWarehouse() {
+    if (syncing) return;
+    setSyncing(true);
+    setError(null);
+    try {
+      const res = await syncWarehouse();
+      setLatestGameDate(res.latest_game_date);
+      await loadSlateForDate(slateDate || undefined);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Error sincronizando datos.");
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   // Debounced player autocomplete
   useEffect(() => {
@@ -303,20 +335,19 @@ export function App() {
     const otherTeam = teamData.is_home ? gameData.away : gameData.home;
     const oppOuts = otherTeam.rows.filter((r) => r.is_out).map((r) => r.player_name);
 
-    const parts = [
-      `Cómo proyecta ${row.player_name}`,
-      teamData.is_home ? "de local" : "de visitante",
-      `contra ${teamData.opponent_abbreviation}`,
-      teamData.is_back_to_back ? "en back-to-back" : "",
-      ownOuts.length > 0 ? `sin ${ownOuts.join(" ni ")}` : "",
-      oppOuts.length > 0 ? `y con ${oppOuts.join(" y ")} fuera en el rival` : "",
-    ].filter(Boolean);
-
     try {
-      const resp = await askAgent(`${parts.join(" ")}?`);
+      const resp = await explainScenario({
+        player_name: row.player_name,
+        opponent_team: teamData.opponent_abbreviation,
+        out_players: ownOuts,
+        opponent_out_players: oppOuts,
+        is_back_to_back: teamData.is_back_to_back,
+        rest_days: teamData.is_back_to_back ? 0 : 1,
+        is_home: teamData.is_home,
+      });
       setAiByPlayer((prev) => ({ ...prev, [row.player_id]: resp }));
     } catch (err) {
-      setAiError(err instanceof Error ? err.message : "Error consultando al agente LangGraph.");
+      setAiError(err instanceof Error ? err.message : "Error explicando con IA.");
     } finally {
       setAiLoadingId(null);
     }
@@ -435,6 +466,27 @@ export function App() {
 
             <button
               type="button"
+              onClick={() => void handleSyncWarehouse()}
+              disabled={syncing}
+              title={
+                latestGameDate
+                  ? `Datos locales al ${latestGameDate} · Clic para sincronizar últimos partidos`
+                  : "Sincronizar últimos partidos NBA"
+              }
+              className="hidden h-9 shrink-0 items-center gap-1.5 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-2.5 text-[11px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:opacity-50 sm:inline-flex cursor-pointer"
+            >
+              <RefreshCw className={cn("h-3 w-3", syncing && "animate-spin text-[var(--accent)]")} />
+              <span className="num">
+                {syncing
+                  ? "Sincronizando..."
+                  : latestGameDate
+                  ? `Datos ${latestGameDate.slice(5)}`
+                  : "Sincronizar"}
+              </span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => setDarkMode((d) => !d)}
               aria-label="Cambiar tema"
               className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] cursor-pointer"
@@ -450,11 +502,12 @@ export function App() {
                   key={p.player_id}
                   type="button"
                   onClick={() => handleSelectPlayerFromSearch(p)}
-                  className="flex h-9 w-full items-center justify-between px-3 text-left text-xs transition-colors hover:bg-[var(--bg-subtle)] cursor-pointer"
+                  className="flex h-10 w-full items-center justify-between px-3 text-left text-xs transition-colors hover:bg-[var(--bg-subtle)] cursor-pointer"
                 >
-                  <span className="font-medium text-[var(--text-primary)]">
-                    {p.full_name}
-                    <span className="num ml-2 text-[11px] text-[var(--text-muted)]">
+                  <span className="flex items-center gap-2 font-medium text-[var(--text-primary)]">
+                    <PlayerAvatar playerId={p.player_id} name={p.full_name} size="sm" />
+                    <span>{p.full_name}</span>
+                    <span className="num text-[11px] text-[var(--text-muted)]">
                       {p.team_abbreviation} · {p.pos_group}
                     </span>
                   </span>
@@ -747,18 +800,57 @@ export function App() {
               </div>
             </div>
 
+            {/* Stat Columns View Toggle */}
+            <div className="flex flex-wrap items-center justify-between gap-2 px-1 pt-1">
+              <span className="text-[11px] text-[var(--text-muted)]">
+                Hacé clic en cualquier jugador para ver su foto, todas las estadísticas y últimos 15 partidos.
+              </span>
+              <div className="inline-flex h-7 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-0.5 text-[11px]">
+                {(
+                  [
+                    { id: "main", label: "Principales" },
+                    { id: "extras", label: "Defensa y Uso" },
+                    { id: "all", label: "Todas (13)" },
+                  ] as const
+                ).map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setStatView(tab.id)}
+                    className={cn(
+                      "rounded px-2.5 font-medium transition-colors cursor-pointer",
+                      statView === tab.id
+                        ? "bg-[var(--accent)] text-white"
+                        : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                    )}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* 5. Side-by-Side Boxscore Tables (Visitante | Local) */}
-            <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <div
+              className={cn(
+                "grid grid-cols-1 gap-6",
+                statView === "all" ? "xl:grid-cols-1" : "xl:grid-cols-2"
+              )}
+            >
               <TeamBoxscoreTable
                 teamFullName={awayTeamObj?.full_name ?? gameData.away.team_abbreviation}
                 roleLabel="Visitante"
                 data={gameData.away}
+                statView={statView}
                 isB2B={awayB2B}
                 onToggleB2B={() => setAwayB2B((v) => !v)}
                 onToggleOut={(pid) => toggleOut("away", pid)}
                 expandedPlayerId={expandedPlayerId}
                 onToggleExpand={(pid) =>
                   setExpandedPlayerId((curr) => (curr === pid ? null : pid))
+                }
+                onOpenPlayer={(row) =>
+                  setModalPlayer({ playerId: row.player_id, side: "away" })
                 }
                 aiLoadingId={aiLoadingId}
                 aiByPlayer={aiByPlayer}
@@ -770,12 +862,16 @@ export function App() {
                 teamFullName={homeTeamObj?.full_name ?? gameData.home.team_abbreviation}
                 roleLabel="Local"
                 data={gameData.home}
+                statView={statView}
                 isB2B={homeB2B}
                 onToggleB2B={() => setHomeB2B((v) => !v)}
                 onToggleOut={(pid) => toggleOut("home", pid)}
                 expandedPlayerId={expandedPlayerId}
                 onToggleExpand={(pid) =>
                   setExpandedPlayerId((curr) => (curr === pid ? null : pid))
+                }
+                onOpenPlayer={(row) =>
+                  setModalPlayer({ playerId: row.player_id, side: "home" })
                 }
                 aiLoadingId={aiLoadingId}
                 aiByPlayer={aiByPlayer}
@@ -790,6 +886,31 @@ export function App() {
           </div>
         )}
       </div>
+
+      {/* Dedicated Player Detail Modal (headshot, 13 stats, splits, 15 game logs, AI) */}
+      {gameData && modalPlayer
+        ? (() => {
+            const teamData = modalPlayer.side === "away" ? gameData.away : gameData.home;
+            const row = teamData.rows.find((r) => r.player_id === modalPlayer.playerId);
+            if (!row) return null;
+            const teamFullName =
+              modalPlayer.side === "away"
+                ? awayTeamObj?.full_name ?? gameData.away.team_abbreviation
+                : homeTeamObj?.full_name ?? gameData.home.team_abbreviation;
+            return (
+              <PlayerDetailModal
+                row={row}
+                teamData={teamData}
+                teamFullName={teamFullName}
+                aiLoading={aiLoadingId === row.player_id}
+                aiResponse={aiByPlayer[row.player_id]}
+                aiError={aiError}
+                onExplainWithAI={handleExplainWithAI}
+                onClose={() => setModalPlayer(null)}
+              />
+            );
+          })()
+        : null}
     </div>
   );
 }

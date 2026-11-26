@@ -9,6 +9,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from nba_stats.agent.graph import build_prediction_graph
+from nba_stats.agent.nodes import AgentNodes
 from nba_stats.api.app import create_app
 from nba_stats.api.injuries import InjuryService
 from nba_stats.api.slate import SlateService
@@ -90,13 +91,24 @@ def test_api_endpoints_end_to_end(tmp_path: Path) -> None:
         settings=settings,
         simulator=sim,
         agent_graph=graph,
+        agent_nodes=AgentNodes(simulator=sim, analyst_llm=_FakeAnalyst(), settings=settings),
         slate_service=_FakeSlateService(duckdb_path=settings.duckdb_path),
         injury_service=_FakeInjuryService(),
     )
     client = TestClient(app)
 
     # Health & Today's Slate
-    assert client.get("/api/v1/health").json() == {"status": "ok"}
+    health = client.get("/api/v1/health").json()
+    assert health["status"] == "ok"
+    assert health["latest_game_date"] is not None
+
+    # ESPN name normalization handles suffixes & aliases
+    from nba_stats.api.injuries import normalize_name
+
+    assert normalize_name("Jaren Jackson Jr.") == "jaren jackson"
+    assert normalize_name("Trey Murphy III") == "trey murphy"
+    assert normalize_name("Nic Claxton") == "nicolas claxton"
+    assert normalize_name("Nikola Jokić") == "nikola jokic"
     slate = client.get("/api/v1/slate/today").json()
     assert slate["fallback"] is False
     assert len(slate["games"]) == 1
@@ -178,6 +190,31 @@ def test_api_endpoints_end_to_end(tmp_path: Path) -> None:
     away_by_id = {r["player_id"]: r for r in gs["away"]["rows"]}
     assert away_by_id[101]["is_out"] is True
     assert away_by_id[101]["injury_status"] == "OUT"
+
+    # Player profile (splits + recent game logs)
+    prof_resp = client.get("/api/v1/players/102/profile")
+    assert prof_resp.status_code == 200
+    prof = prof_resp.json()
+    assert prof["full_name"] == "Jamal Murray"
+    assert prof["total_games"] > 0
+    assert len(prof["recent_games"]) > 0
+    assert len(prof["splits"]) > 0
+
+    # Fast direct AI explain endpoint (no parse_query LLM call)
+    exp_resp = client.post(
+        "/api/v1/explain",
+        json={
+            "player_name": "Jamal Murray",
+            "opponent_team": "LAL",
+            "out_players": ["Nikola Jokic"],
+            "is_back_to_back": True,
+            "is_home": True,
+        },
+    )
+    assert exp_resp.status_code == 200
+    exp_data = exp_resp.json()
+    assert exp_data["verification_passed"] is True
+    assert "Nikola Jokić" in exp_data["analysis"]
 
     # Ask LangGraph agent
     ask_resp = client.post(

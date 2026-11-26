@@ -209,6 +209,66 @@ export interface TodaySlateResponse {
   cached: boolean;
 }
 
+export interface ExplainResponse {
+  ml_result: SimulationResult;
+  analysis: string;
+  verification_passed: boolean;
+}
+
+export interface PlayerGameLogItem {
+  game_id: string;
+  game_date: string;
+  opponent_abbreviation: string;
+  is_home: boolean;
+  wl: string | null;
+  min: number;
+  pts: number;
+  reb: number;
+  ast: number;
+  pra: number;
+  stl: number;
+  blk: number;
+  tov: number;
+  pf: number;
+  fga: number;
+  fg3a: number;
+  ftm: number;
+  fta: number;
+  plus_minus: number;
+  usg_pct: number | null;
+  ts_pct: number | null;
+}
+
+export interface PlayerSplitsSummary {
+  label: string;
+  games: number;
+  min: number;
+  pts: number;
+  reb: number;
+  ast: number;
+  pra: number;
+  stl: number;
+  blk: number;
+  tov: number;
+  fga: number;
+  ftm: number;
+}
+
+export interface PlayerProfileResponse {
+  player_id: number;
+  full_name: string;
+  team_id: number;
+  team_abbreviation: string;
+  pos_group: string;
+  total_games: number;
+  splits: PlayerSplitsSummary[];
+  recent_games: PlayerGameLogItem[];
+}
+
+export function playerHeadshotUrl(playerId: number): string {
+  return `https://cdn.nba.com/headshots/nba/latest/260x190/${playerId}.png`;
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -232,8 +292,25 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export function fetchHealth(): Promise<{ status: string }> {
-  return requestJson<{ status: string }>("/api/v1/health");
+export interface HealthResponse {
+  status: string;
+  latest_game_date: string | null;
+}
+
+export interface SyncResponse {
+  status: string;
+  season: string;
+  games_ingested: number;
+  player_logs_ingested: number;
+  latest_game_date: string | null;
+}
+
+export function fetchHealth(): Promise<HealthResponse> {
+  return requestJson<HealthResponse>("/api/v1/health");
+}
+
+export function syncWarehouse(): Promise<SyncResponse> {
+  return requestJson<SyncResponse>("/api/v1/sync", { method: "POST" });
 }
 
 export function fetchTeams(): Promise<TeamItem[]> {
@@ -280,4 +357,15 @@ export function simulateGame(payload: GameSimulationRequest): Promise<GameSimula
 export function fetchTodaySlate(gameDate?: string): Promise<TodaySlateResponse> {
   const query = gameDate ? `?game_date=${encodeURIComponent(gameDate)}` : "";
   return requestJson<TodaySlateResponse>(`/api/v1/slate/today${query}`);
+}
+
+export function explainScenario(payload: ScenarioRequest): Promise<ExplainResponse> {
+  return requestJson<ExplainResponse>("/api/v1/explain", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchPlayerProfile(playerId: number, limit = 15): Promise<PlayerProfileResponse> {
+  return requestJson<PlayerProfileResponse>(`/api/v1/players/${playerId}/profile?limit=${limit}`);
 }

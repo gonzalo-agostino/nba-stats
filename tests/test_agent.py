@@ -11,8 +11,10 @@ from nba_stats.agent.evals import (
     score_parse_accuracy,
 )
 from nba_stats.agent.graph import build_prediction_graph
+from nba_stats.agent.nodes import extract_text_content
 from nba_stats.agent.verifier import verify_analysis_numbers
 from nba_stats.simulator.schemas import (
+    OpponentDefenseContext,
     ScenarioRequest,
     ShapDriver,
     SimulationResult,
@@ -188,3 +190,41 @@ def test_eval_helpers() -> None:
     case = GOLDEN_EVAL_CASES[0]
     parsed = ScenarioRequest(**case["expected"])
     assert score_parse_accuracy(parsed, case["expected"]) == 1.0
+
+
+def test_extract_text_content_handles_gemini_blocks() -> None:
+    blocks = [
+        {"type": "thinking", "thinking": "internal chain of thought"},
+        {"type": "text", "text": "* Proyección estable.", "thought_signature": "AY89a18h..."},
+    ]
+    assert extract_text_content(blocks) == "* Proyección estable."
+    assert extract_text_content("  texto plano  ") == "texto plano"
+
+
+def test_verifier_allows_opponent_defense_numbers() -> None:
+    res = _sample_sim_result()
+    res.opponent_defense = OpponentDefenseContext(
+        team_abbreviation="PHI",
+        def_rating_10=121.3,
+        def_rating_rank=27,
+        pace_10=98.9,
+        pace_rank=11,
+        pts_allowed_10=118.4,
+        reb_allowed_10=45.2,
+        ast_allowed_10=27.1,
+        efg_allowed_10=0.555,
+        fg3a_allowed_10=37.0,
+        tov_forced_10=13.2,
+        dvp_pts_10=26.0,
+        net_rating_diff=4.5,
+        opp_missing_minutes=32.5,
+        opp_missing_def_stocks=1.93,
+        opp_star_out=True,
+    )
+    text = (
+        "Murray proyecta 25.2 PTS ante PHI que permite 118.4 puntos y pierde 32.5 minutos "
+        "y 1.93 bloqueos/robos por la ausencia de Embiid."
+    )
+    ok, errs = verify_analysis_numbers(text, res)
+    assert ok is True
+    assert errs == []

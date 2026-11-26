@@ -25,12 +25,81 @@ Extrae la información del usuario en el esquema ScenarioRequest:
 No inventes jugadores ni rivales que no estén en la consulta."""
 
 ANALYST_SYSTEM_PROMPT = """Eres un analista cuantitativo de NBA.
-Tu tarea es explicar de forma concisa (3 a 5 viñetas en español) POR QUÉ suben o bajan las proyecciones del escenario respecto a la proyección base.
+Tu tarea es explicar de forma concisa (3 a 4 viñetas en español claro, sin nombres técnicos de variables en inglés ni snake_case) POR QUÉ suben o bajan las proyecciones del escenario respecto a la proyección base.
 REGLAS ESTRICTAS:
-1. Cita ÚNICAMENTE números que aparezcan exactamente en el JSON de `ml_result` (proyecciones base, escenario, deltas, SHAP drivers, `opponent_defense` e historial WOWY).
+1. Cita ÚNICAMENTE números que aparezcan exactamente en el JSON de `ml_result` (proyecciones base, escenario, deltas, factores SHAP, `opponent_defense` e historial WOWY).
 2. NUNCA inventes estadísticas, promedios ni porcentajes que no estén en el JSON.
-3. Menciona el perfil defensivo del rival (DefRtg y su ranking #1-#30 si está disponible), bajas del rival si existen, principales SHAP drivers y el historial WOWY real.
+3. Menciona el perfil defensivo del rival (DefRtg y su ranking #1-#30 si está disponible), bajas del rival si existen, principales factores SHAP y el historial WOWY real si existe.
 4. Si la diferencia entre base y escenario es pequeña, explícalo con honestidad."""
+
+FEATURE_LABELS_ES: dict[str, str] = {
+    "pred_min": "Minutos proyectados",
+    "min_ewma_10": "Tendencia de minutos (10p)",
+    "min_ewma_3": "Minutos muy recientes (3p)",
+    "min_avg_5": "Promedio de minutos (5p)",
+    "min_avg_10": "Promedio de minutos (10p)",
+    "min_avg_20": "Promedio de minutos (20p)",
+    "min_last_game": "Minutos en el último partido",
+    "pts_ewma_10": "Tendencia de puntos (10p)",
+    "pts_avg_5": "Promedio de puntos (5p)",
+    "pts_avg_10": "Promedio de puntos (10p)",
+    "pts_avg_20": "Promedio de puntos (20p)",
+    "pts_per36_10": "Ritmo de puntos por 36 min",
+    "reb_ewma_10": "Tendencia de rebotes (10p)",
+    "reb_avg_10": "Promedio de rebotes (10p)",
+    "reb_avg_20": "Promedio de rebotes (20p)",
+    "reb_per36_10": "Rebotes por 36 min",
+    "ast_ewma_10": "Tendencia de asistencias (10p)",
+    "ast_avg_10": "Promedio de asistencias (10p)",
+    "ast_avg_20": "Promedio de asistencias (20p)",
+    "ast_per36_10": "Asistencias por 36 min",
+    "fga_ewma_10": "Volumen de tiros (10p)",
+    "fga_avg_10": "Tiros de campo promedio (10p)",
+    "fga_per36_10": "Tiros por 36 min",
+    "usg_pct_ewma_10": "Uso ofensivo reciente (USG%)",
+    "usg_pct_avg_10": "Uso ofensivo promedio (10p)",
+    "ts_pct_avg_10": "Eficiencia de tiro (TS%)",
+    "missing_team_minutes": "Minutos ausentes en el equipo",
+    "missing_team_usage_pct": "Uso ofensivo ausente en el equipo",
+    "missing_same_pos_minutes": "Minutos ausentes en su misma posición",
+    "star_teammate_out": "Estrella del equipo ausente",
+    "opp_def_rating_10": "Rating defensivo del rival (10p)",
+    "opp_pace_10": "Ritmo del rival (10p)",
+    "opp_pts_allowed_10": "Puntos permitidos por el rival",
+    "opp_missing_team_minutes": "Minutos ausentes en el rival",
+    "opp_missing_center_minutes": "Minutos de pivotes ausentes en el rival",
+    "opp_missing_def_stocks": "Stocks defensivos ausentes en el rival",
+    "is_back_to_back": "Back-to-back (fatiga)",
+    "is_home": "Localía",
+    "player_rest_days": "Días de descanso del jugador",
+    "is_returning_from_absence": "Vuelta tras ausencia prolongada",
+    "wowy_delta_min": "Historial WOWY en minutos",
+    "wowy_delta_pts_p36": "Historial WOWY en puntos/36",
+}
+
+
+def _humanize_feature_es(name: str) -> str:
+    return FEATURE_LABELS_ES.get(name, name.replace("_", " "))
+
+
+def extract_text_content(content: Any) -> str:
+    """Normalize LangChain/Gemini response content (str or list of content blocks) to plain text."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                if block.strip():
+                    parts.append(block)
+            elif isinstance(block, dict):
+                # Skip thought/reasoning blocks; keep only visible text blocks
+                block_type = block.get("type")
+                if block_type in ("text", None) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+        if parts:
+            return "\n".join(parts).strip()
+    return str(content).strip()
 
 
 def build_vertex_llm(settings: Settings | None = None, temperature: float = 0.0) -> ChatVertexAI:
@@ -39,6 +108,8 @@ def build_vertex_llm(settings: Settings | None = None, temperature: float = 0.0)
         "model": cfg.vertex_model_name,
         "location": cfg.google_cloud_location,
         "temperature": temperature,
+        "thinking_budget": 0,
+        "max_output_tokens": 600,
     }
     if cfg.google_cloud_project:
         kwargs["project"] = cfg.google_cloud_project
@@ -157,6 +228,71 @@ class AgentNodes:
         result = self.simulator.simulate(scenario)
         return {"ml_result": result}
 
+    def _compact_ml_payload(self, result: SimulationResult) -> str:
+        """Build a compact JSON summary for the analyst LLM to minimize tokens and latency."""
+        compact = {
+            "player_name": result.player_name,
+            "team_abbreviation": result.team_abbreviation,
+            "opponent_abbreviation": result.opponent_abbreviation,
+            "is_home": result.is_home,
+            "is_back_to_back": result.is_back_to_back,
+            "out_players_resolved": result.out_players_resolved,
+            "opp_out_players_resolved": result.opp_out_players_resolved,
+            "missing_team_minutes": result.missing_team_minutes,
+            "base_projection": result.base_projection.model_dump(),
+            "scenario_projection": result.scenario_projection.model_dump(),
+            "deltas": result.deltas.model_dump(),
+            "opponent_defense": (
+                result.opponent_defense.model_dump() if result.opponent_defense else None
+            ),
+            "wowy_context": result.wowy_context.model_dump() if result.wowy_context else None,
+            "shap_drivers": {
+                k: [
+                    {
+                        "factor": _humanize_feature_es(d.feature),
+                        "value": d.value,
+                        "shap_value": d.shap_value,
+                    }
+                    for d in result.shap_drivers.get(k, [])[:3]
+                ]
+                for k in ("min", "pts", "reb", "ast")
+                if k in result.shap_drivers
+            },
+        }
+        import json
+
+        return json.dumps(compact, ensure_ascii=False)
+
+    def explain_simulation_direct(self, result: SimulationResult) -> tuple[str, bool]:
+        """Fast path: explain a pre-computed SimulationResult without running parse_query."""
+        payload_json = self._compact_ml_payload(result)
+        errors: list[str] = []
+        draft = ""
+        for _attempt in range(2):
+            retry_hint = ""
+            if errors:
+                retry_hint = (
+                    "\n\nATENCIÓN — tu borrador anterior tuvo errores numéricos. Corrígelos estrictamente:\n- "
+                    + "\n- ".join(errors)
+                )
+            prompt = (
+                f"Explica de forma concisa la proyección de {result.player_name} vs "
+                f"{result.opponent_abbreviation}.\n\n"
+                f"Salida exacta del modelo ML (JSON):\n{payload_json}"
+                f"{retry_hint}"
+            )
+            resp = self.analyst_llm.invoke(
+                [
+                    SystemMessage(content=ANALYST_SYSTEM_PROMPT),
+                    HumanMessage(content=prompt),
+                ]
+            )
+            draft = extract_text_content(resp.content)
+            passed, errors = verify_analysis_numbers(draft, result)
+            if passed:
+                return draft, True
+        return format_deterministic_fallback(result), False
+
     def explain_projection(self, state: PredictionGraphState) -> dict[str, Any]:
         result = state["ml_result"]
         assert result is not None
@@ -169,7 +305,7 @@ class AgentNodes:
             )
         prompt = (
             f"Consulta original: {state['user_query']}\n\n"
-            f"Salida exacta del modelo ML (JSON):\n{result.model_dump_json(indent=2)}"
+            f"Salida exacta del modelo ML (JSON):\n{self._compact_ml_payload(result)}"
             f"{retry_hint}"
         )
         resp = self.analyst_llm.invoke(
@@ -178,8 +314,8 @@ class AgentNodes:
                 HumanMessage(content=prompt),
             ]
         )
-        text = resp.content if isinstance(resp.content, str) else str(resp.content)
-        return {"draft_analysis": text.strip()}
+        text = extract_text_content(resp.content)
+        return {"draft_analysis": text}
 
     def verify_output(self, state: PredictionGraphState) -> dict[str, Any]:
         result = state["ml_result"]

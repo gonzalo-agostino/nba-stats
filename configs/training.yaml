@@ -23,13 +23,13 @@ derived_targets:
     - "pts"
     - "ast"
 
-# Poisson objective prevents low-count discrete stats (BLK/STL/PF/TOV/FTM) from collapsing to median 0
+# Poisson objective prevents low-count discrete stats (BLK/STL/PF/TOV) from collapsing to median 0
+# FTM uses regression_l1 to directly optimize MAE without zero-inflation collapse
 target_objectives:
   stl: "poisson"
   blk: "poisson"
   tov: "poisson"
   pf: "poisson"
-  ftm: "poisson"
 
 validation:
   n_splits: 5

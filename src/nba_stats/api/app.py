@@ -9,14 +9,19 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from nba_stats.agent.graph import build_prediction_graph, run_agent_query
+from nba_stats.agent.nodes import AgentNodes
 from nba_stats.api.injuries import InjuryService, normalize_name
 from nba_stats.api.schemas import (
     AskRequest,
     AskResponse,
+    ExplainResponse,
     GamePaceSummary,
     GameSimulationRequest,
     GameSimulationResponse,
+    PlayerGameLogItem,
+    PlayerProfileResponse,
     PlayerSearchItem,
+    PlayerSplitsSummary,
     RosterPlayerItem,
     TeamItem,
     TeamSimulationRequest,
@@ -24,7 +29,8 @@ from nba_stats.api.schemas import (
     TodaySlateResponse,
 )
 from nba_stats.api.slate import SlateService
-from nba_stats.config import Settings
+from nba_stats.config import Settings, load_ingestion_config
+from nba_stats.data.ingest import run_ingestion
 from nba_stats.simulator.schemas import ScenarioRequest, SimulationResult
 from nba_stats.simulator.what_if import EntityResolutionError, WhatIfSimulator
 
@@ -33,6 +39,7 @@ def create_app(
     settings: Settings | None = None,
     simulator: WhatIfSimulator | None = None,
     agent_graph: Any | None = None,
+    agent_nodes: AgentNodes | None = None,
     slate_service: SlateService | None = None,
     injury_service: InjuryService | None = None,
 ) -> FastAPI:
@@ -61,6 +68,7 @@ def create_app(
     state: dict[str, Any] = {
         "simulator": simulator,
         "agent_graph": agent_graph,
+        "agent_nodes": agent_nodes,
         "slate_service": slate_service or SlateService(duckdb_path=cfg.duckdb_path),
         "injury_service": injury_service or InjuryService(),
     }
@@ -69,6 +77,11 @@ def create_app(
         if state["simulator"] is None:
             state["simulator"] = WhatIfSimulator(settings=cfg)
         return state["simulator"]
+
+    def _get_agent_nodes() -> AgentNodes:
+        if state["agent_nodes"] is None:
+            state["agent_nodes"] = AgentNodes(simulator=_get_simulator(), settings=cfg)
+        return state["agent_nodes"]
 
     def _get_graph() -> Any:
         if state["agent_graph"] is None:
@@ -81,9 +94,49 @@ def create_app(
     def _connect_db() -> duckdb.DuckDBPyConnection:
         return duckdb.connect(str(cfg.duckdb_path), read_only=True)
 
+    def _get_latest_game_date() -> str | None:
+        if not cfg.duckdb_path.exists():
+            return None
+        try:
+            with _connect_db() as con:
+                row = con.execute("SELECT MAX(game_date) FROM player_game_logs").fetchall()
+            if row and row[0][0] is not None:
+                return str(row[0][0])[:10]
+        except duckdb.Error:
+            return None
+        return None
+
     @app.get("/api/v1/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health() -> dict[str, str | None]:
+        return {"status": "ok", "latest_game_date": _get_latest_game_date()}
+
+    @app.post("/api/v1/sync")
+    def sync_warehouse() -> dict[str, Any]:
+        """Run incremental ingestion for the active season and invalidate in-memory caches."""
+        ing_cfg = load_ingestion_config(cfg)
+        try:
+            report = run_ingestion(
+                seasons=[ing_cfg.active_season],
+                force=False,
+                settings=cfg,
+                config=ing_cfg,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Error sincronizando datos: {exc}") from exc
+
+        if state["simulator"] is not None:
+            state["simulator"].clear_caches()
+        state["slate_service"]._cache.clear()
+        state["injury_service"].get_injuries(force_refresh=True)
+
+        summary = report.seasons[0] if report.seasons else None
+        return {
+            "status": "ok",
+            "season": ing_cfg.active_season,
+            "games_ingested": summary.games_rows if summary else 0,
+            "player_logs_ingested": summary.player_logs_rows if summary else 0,
+            "latest_game_date": _get_latest_game_date(),
+        }
 
     @app.get("/api/v1/slate/today", response_model=TodaySlateResponse)
     def get_today_slate(
@@ -385,6 +438,158 @@ def create_app(
             home_out_player_ids=home_outs,
             injuries_updated_at=inj_data.get("updated_at"),
             injuries_fallback=bool(inj_data.get("fallback", False)),
+        )
+
+    @app.get("/api/v1/players/{player_id}/profile", response_model=PlayerProfileResponse)
+    def get_player_profile(
+        player_id: int,
+        limit: int = Query(default=15, ge=5, le=30),
+    ) -> PlayerProfileResponse:
+        with _connect_db() as con:
+            meta = con.execute(
+                """
+                SELECT
+                    l.player_id,
+                    l.player_name,
+                    l.team_id,
+                    l.team_abbreviation,
+                    COALESCE(p.pos_group, 'UNK') AS pos_group
+                FROM player_game_logs l
+                LEFT JOIN players p ON l.player_id = p.player_id
+                WHERE l.player_id = ?
+                ORDER BY l.game_date DESC, l.game_id DESC
+                LIMIT 1
+                """,
+                [player_id],
+            ).fetchall()
+            if not meta:
+                raise HTTPException(status_code=404, detail=f"Jugador {player_id} no encontrado.")
+
+            total_games = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM player_game_logs WHERE player_id = ?",
+                    [player_id],
+                ).fetchall()[0][0]
+            )
+
+            log_rows = con.execute(
+                """
+                SELECT
+                    l.game_id,
+                    CAST(l.game_date AS VARCHAR) AS game_date,
+                    COALESCE(opp.abbreviation, 'OPP') AS opp_abbr,
+                    COALESCE(l.is_home, false) AS is_home,
+                    l.wl,
+                    COALESCE(l.min, 0.0),
+                    COALESCE(l.pts, 0.0),
+                    COALESCE(l.reb, 0.0),
+                    COALESCE(l.ast, 0.0),
+                    COALESCE(l.stl, 0.0),
+                    COALESCE(l.blk, 0.0),
+                    COALESCE(l.tov, 0.0),
+                    COALESCE(l.pf, 0.0),
+                    COALESCE(l.fga, 0.0),
+                    COALESCE(l.fg3a, 0.0),
+                    COALESCE(l.ftm, 0.0),
+                    COALESCE(l.fta, 0.0),
+                    COALESCE(l.plus_minus, 0.0),
+                    l.usg_pct,
+                    l.ts_pct
+                FROM player_game_logs l
+                LEFT JOIN teams opp ON l.opp_team_id = opp.team_id
+                WHERE l.player_id = ?
+                ORDER BY l.game_date DESC, l.game_id DESC
+                LIMIT ?
+                """,
+                [player_id, max(limit, 25)],
+            ).fetchall()
+
+        all_logs = [
+            PlayerGameLogItem(
+                game_id=str(r[0]),
+                game_date=str(r[1])[:10],
+                opponent_abbreviation=str(r[2]),
+                is_home=bool(r[3]),
+                wl=str(r[4]) if r[4] is not None else None,
+                min=round(float(r[5]), 1),
+                pts=round(float(r[6]), 1),
+                reb=round(float(r[7]), 1),
+                ast=round(float(r[8]), 1),
+                pra=round(float(r[6]) + float(r[7]) + float(r[8]), 1),
+                stl=round(float(r[9]), 1),
+                blk=round(float(r[10]), 1),
+                tov=round(float(r[11]), 1),
+                pf=round(float(r[12]), 1),
+                fga=round(float(r[13]), 1),
+                fg3a=round(float(r[14]), 1),
+                ftm=round(float(r[15]), 1),
+                fta=round(float(r[16]), 1),
+                plus_minus=round(float(r[17]), 1),
+                usg_pct=round(float(r[18]), 3) if r[18] is not None else None,
+                ts_pct=round(float(r[19]), 3) if r[19] is not None else None,
+            )
+            for r in log_rows
+        ]
+
+        def _make_split(label: str, subset: list[PlayerGameLogItem]) -> PlayerSplitsSummary | None:
+            if not subset:
+                return None
+            n = len(subset)
+            return PlayerSplitsSummary(
+                label=label,
+                games=n,
+                min=round(sum(g.min for g in subset) / n, 1),
+                pts=round(sum(g.pts for g in subset) / n, 1),
+                reb=round(sum(g.reb for g in subset) / n, 1),
+                ast=round(sum(g.ast for g in subset) / n, 1),
+                pra=round(sum(g.pra for g in subset) / n, 1),
+                stl=round(sum(g.stl for g in subset) / n, 1),
+                blk=round(sum(g.blk for g in subset) / n, 1),
+                tov=round(sum(g.tov for g in subset) / n, 1),
+                fga=round(sum(g.fga for g in subset) / n, 1),
+                ftm=round(sum(g.ftm for g in subset) / n, 1),
+            )
+
+        splits_candidates = [
+            _make_split("Últ. 5", all_logs[:5]),
+            _make_split("Últ. 10", all_logs[:10]),
+            _make_split("Últ. 20", all_logs[:20]),
+            _make_split("Local", [g for g in all_logs[:20] if g.is_home]),
+            _make_split("Visitante", [g for g in all_logs[:20] if not g.is_home]),
+        ]
+        splits = [s for s in splits_candidates if s is not None]
+
+        m = meta[0]
+        return PlayerProfileResponse(
+            player_id=int(m[0]),
+            full_name=str(m[1]),
+            team_id=int(m[2]),
+            team_abbreviation=str(m[3]),
+            pos_group=str(m[4]),
+            total_games=total_games,
+            splits=splits,
+            recent_games=all_logs[:limit],
+        )
+
+    @app.post("/api/v1/explain", response_model=ExplainResponse)
+    def explain_scenario_direct(request: ScenarioRequest) -> ExplainResponse:
+        """Fast direct AI explanation for a structured ScenarioRequest (skips parse_query LLM call)."""
+        sim = _get_simulator()
+        try:
+            sim_result = sim.simulate(request)
+            nodes = _get_agent_nodes()
+            analysis, passed = nodes.explain_simulation_direct(sim_result)
+        except EntityResolutionError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Error explicando escenario: {exc}") from exc
+
+        return ExplainResponse(
+            ml_result=sim_result,
+            analysis=analysis,
+            verification_passed=passed,
         )
 
     @app.post("/api/v1/ask", response_model=AskResponse)

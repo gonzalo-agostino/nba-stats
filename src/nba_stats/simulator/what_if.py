@@ -79,6 +79,27 @@ class WhatIfSimulator:
             if (self.models_dir / f"{t}_model.joblib").exists()
         }
 
+        # In-memory caches for sub-100ms What-If toggles (read-only DuckDB warehouse)
+        self._team_abbr_cache: dict[int, str] = {}
+        self._roster_cache: dict[tuple[int, int], list[tuple[int, str, str, float]]] = {}
+        self._player_feats_cache: dict[int, dict[str, float]] = {}
+        self._out_profile_cache: dict[int, tuple[str, str, float, float, float]] = {}
+        self._matchup_cache: dict[
+            tuple[int, int | None, str], tuple[dict[str, float], OpponentDefenseContext]
+        ] = {}
+        self._wowy_cache: dict[tuple[int, int, int], tuple[dict[str, float], WowyContext | None]] = {}
+        self._base_proj_cache: dict[tuple[int, int | None, bool], StatProjection] = {}
+
+    def clear_caches(self) -> None:
+        """Invalidate all in-memory feature/roster/projection caches (e.g. after data sync)."""
+        self._team_abbr_cache.clear()
+        self._roster_cache.clear()
+        self._player_feats_cache.clear()
+        self._out_profile_cache.clear()
+        self._matchup_cache.clear()
+        self._wowy_cache.clear()
+        self._base_proj_cache.clear()
+
     def _connect(self) -> duckdb.DuckDBPyConnection:
         return duckdb.connect(str(self.duckdb_path), read_only=True)
 
@@ -226,6 +247,19 @@ class WhatIfSimulator:
             [player.player_id],
         ).fetchall()[0][0]
 
+        team_latest_rows = con.execute(
+            "SELECT MAX(game_date) FROM team_game_logs WHERE team_id = ?",
+            [player.team_id],
+        ).fetchall()
+        team_latest_date = pd.to_datetime(team_latest_rows[0][0]) if team_latest_rows and team_latest_rows[0][0] is not None else None
+        player_last_date = pd.to_datetime(logs.iloc[0]["game_date"])
+        if team_latest_date is not None and pd.notna(player_last_date):
+            # Estimate rest days relative to the next scheduled game after the team's latest logged game
+            gap_days = int((team_latest_date - player_last_date).days) + 1
+            real_player_rest_days = float(min(14, max(0, gap_days)))
+        else:
+            real_player_rest_days = 1.0
+
         asc = logs.iloc[::-1].reset_index(drop=True)
         last5 = logs.head(5)
         last10 = logs.head(10)
@@ -237,6 +271,8 @@ class WhatIfSimulator:
         feats: dict[str, float] = {
             "pos_group_code": float(POS_GROUP_MAP.get(player.pos_group, -1)),
             "games_played_prior": float(total_games),
+            "player_rest_days": real_player_rest_days,
+            "is_returning_from_absence": 1.0 if real_player_rest_days >= 7.0 else 0.0,
             "min_last_game": float(logs.iloc[0]["min"]),
             # Rolling 5
             "min_avg_5": float(last5["min"].mean()),
@@ -276,6 +312,10 @@ class WhatIfSimulator:
             "reb_per36_10": 36.0 * float(last10["reb"].sum()) / min_sum_10 if min_sum_10 > 0 else 0.0,
             "ast_per36_10": 36.0 * float(last10["ast"].sum()) / min_sum_10 if min_sum_10 > 0 else 0.0,
             "fga_per36_10": 36.0 * float(last10["fga"].sum()) / min_sum_10 if min_sum_10 > 0 else 0.0,
+            "stl_per36_10": 36.0 * float(last10["stl"].sum()) / min_sum_10 if min_sum_10 > 0 else 0.0,
+            "blk_per36_10": 36.0 * float(last10["blk"].sum()) / min_sum_10 if min_sum_10 > 0 else 0.0,
+            "fta_per36_10": 36.0 * float(last10["fta"].sum()) / min_sum_10 if min_sum_10 > 0 else 0.0,
+            "tov_per36_10": 36.0 * float(last10["tov"].sum()) / min_sum_10 if min_sum_10 > 0 else 0.0,
             # Rolling 20
             "min_avg_20": float(last20["min"].mean()),
             "pts_avg_20": float(last20["pts"].mean()),
@@ -289,6 +329,9 @@ class WhatIfSimulator:
         feats["pts_trend_5_20"] = feats["pts_avg_5"] - feats["pts_avg_20"]
         feats["reb_trend_5_20"] = feats["reb_avg_5"] - feats["reb_avg_20"]
         feats["ast_trend_5_20"] = feats["ast_avg_5"] - feats["ast_avg_20"]
+        feats["min_ewma_3"] = float(
+            asc["min"].ewm(span=3, adjust=False, min_periods=1).mean().iloc[-1]
+        )
 
         for col in ["min", "pts", "reb", "ast", "fga", "usg_pct"]:
             feats[f"{col}_ewma_{span}"] = float(
@@ -768,7 +811,8 @@ class WhatIfSimulator:
             "is_home": 1.0 if request.is_home else 0.0,
             "rest_days": 1.0,
             "is_back_to_back": 0.0,
-            "player_rest_days": 1.0,
+            "player_rest_days": float(player_feats.get("player_rest_days", 1.0)),
+            "is_returning_from_absence": float(player_feats.get("is_returning_from_absence", 0.0)),
             "games_in_last_7_days": 3.0,
             "games_in_last_14_days": 6.0,
             "road_trip_game_num": 0.0 if request.is_home else 1.0,
@@ -800,7 +844,9 @@ class WhatIfSimulator:
         scenario_row.update(opp_overrides)
         scenario_row["is_back_to_back"] = 1.0 if request.is_back_to_back else 0.0
         scenario_row["rest_days"] = float(min(3, effective_rest))
-        scenario_row["player_rest_days"] = float(effective_rest)
+        if request.is_back_to_back or request.rest_days is not None:
+            scenario_row["player_rest_days"] = float(effective_rest)
+            scenario_row["is_returning_from_absence"] = 1.0 if effective_rest >= 7 else 0.0
         if request.is_back_to_back:
             scenario_row["games_in_last_7_days"] = 4.0
 
@@ -869,6 +915,293 @@ class WhatIfSimulator:
             )
         return drivers
 
+    def _get_player_recent_features_cached(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        player: ResolvedPlayer,
+    ) -> dict[str, float]:
+        cached = self._player_feats_cache.get(player.player_id)
+        if cached is not None:
+            return cached
+        feats = self._fetch_player_recent_features(con, player)
+        self._player_feats_cache[player.player_id] = feats
+        return feats
+
+    def _get_matchup_features_cached(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        team_id: int,
+        opp_team_id: int | None,
+        opp_abbr: str,
+        pos_group: str,
+    ) -> tuple[dict[str, float], OpponentDefenseContext]:
+        key = (team_id, opp_team_id, pos_group)
+        cached = self._matchup_cache.get(key)
+        if cached is not None:
+            return cached[0], cached[1].model_copy(deep=True)
+        feats, ctx = self._fetch_matchup_features(
+            con,
+            team_id=team_id,
+            opp_team_id=opp_team_id,
+            opp_abbr=opp_abbr,
+            pos_group=pos_group,
+        )
+        self._matchup_cache[key] = (feats, ctx)
+        return feats, ctx.model_copy(deep=True)
+
+    def _get_out_profile_by_id(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        player_id: int,
+    ) -> tuple[str, str, float, float, float]:
+        """Return cached (full_name, pos_group, avg_min_15, avg_usg_15, avg_stocks_15) by player_id."""
+        cached = self._out_profile_cache.get(player_id)
+        if cached is not None:
+            return cached
+        row = con.execute(
+            """
+            WITH recent AS (
+                SELECT player_name, min, COALESCE(usg_pct, 0.18) AS usg_pct,
+                       COALESCE(stl, 0.0) + COALESCE(blk, 0.0) AS stocks
+                FROM player_game_logs
+                WHERE player_id = ?
+                ORDER BY game_date DESC, game_id DESC
+                LIMIT 15
+            )
+            SELECT
+                MAX(r.player_name),
+                COALESCE(MAX(p.pos_group), 'UNK'),
+                AVG(r.min),
+                AVG(r.usg_pct),
+                AVG(r.stocks)
+            FROM recent r
+            LEFT JOIN players p ON p.player_id = ?
+            """,
+            [player_id, player_id],
+        ).fetchall()[0]
+        profile = (
+            str(row[0] or ""),
+            str(row[1] or "UNK"),
+            float(row[2]) if row[2] is not None else 0.0,
+            float(row[3]) if row[3] is not None else 0.18,
+            float(row[4]) if row[4] is not None else 0.0,
+        )
+        self._out_profile_cache[player_id] = profile
+        return profile
+
+    def _get_wowy_for_pair_cached(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        player_id: int,
+        team_id: int,
+        primary_out_id: int,
+        primary_out_name: str,
+    ) -> tuple[dict[str, float], WowyContext | None]:
+        key = (player_id, team_id, primary_out_id)
+        cached = self._wowy_cache.get(key)
+        if cached is not None:
+            return cached
+
+        shrinkage_k = float(self.features_config.wowy.shrinkage_k)
+        wowy_row = con.execute(
+            """
+            WITH played_star AS (
+                SELECT DISTINCT game_id
+                FROM player_game_logs
+                WHERE player_id = ? AND team_id = ? AND COALESCE(min, 0) > 0
+            ),
+            hist AS (
+                SELECT
+                    CASE WHEN ps.game_id IS NULL THEN 1 ELSE 0 END AS star_out,
+                    p.min,
+                    p.pts,
+                    p.reb,
+                    p.ast,
+                    COALESCE(p.usg_pct, 0.18) AS usg_pct,
+                    CASE WHEN p.min > 0 THEN 36.0 * p.pts / p.min END AS pts_p36,
+                    CASE WHEN p.min > 0 THEN 36.0 * p.reb / p.min END AS reb_p36,
+                    CASE WHEN p.min > 0 THEN 36.0 * p.ast / p.min END AS ast_p36
+                FROM player_game_logs p
+                LEFT JOIN played_star ps ON p.game_id = ps.game_id
+                WHERE p.player_id = ? AND p.team_id = ?
+            )
+            SELECT
+                SUM(CASE WHEN star_out = 1 THEN 1 ELSE 0 END) AS n_out,
+                SUM(CASE WHEN star_out = 0 THEN 1 ELSE 0 END) AS n_in,
+                AVG(CASE WHEN star_out = 1 THEN min END) AS min_out,
+                AVG(CASE WHEN star_out = 0 THEN min END) AS min_in,
+                AVG(CASE WHEN star_out = 1 THEN pts END) AS pts_out,
+                AVG(CASE WHEN star_out = 0 THEN pts END) AS pts_in,
+                AVG(CASE WHEN star_out = 1 THEN reb END) AS reb_out,
+                AVG(CASE WHEN star_out = 0 THEN reb END) AS reb_in,
+                AVG(CASE WHEN star_out = 1 THEN ast END) AS ast_out,
+                AVG(CASE WHEN star_out = 0 THEN ast END) AS ast_in,
+                AVG(CASE WHEN star_out = 1 THEN usg_pct END) AS usg_out,
+                AVG(CASE WHEN star_out = 0 THEN usg_pct END) AS usg_in,
+                AVG(CASE WHEN star_out = 1 THEN pts_p36 END) AS pts_p36_out,
+                AVG(CASE WHEN star_out = 0 THEN pts_p36 END) AS pts_p36_in,
+                AVG(CASE WHEN star_out = 1 THEN reb_p36 END) AS reb_p36_out,
+                AVG(CASE WHEN star_out = 0 THEN reb_p36 END) AS reb_p36_in,
+                AVG(CASE WHEN star_out = 1 THEN ast_p36 END) AS ast_p36_out,
+                AVG(CASE WHEN star_out = 0 THEN ast_p36 END) AS ast_p36_in
+            FROM hist
+            """,
+            [primary_out_id, team_id, player_id, team_id],
+        ).fetchall()[0]
+
+        n_out = int(wowy_row[0] or 0)
+        n_in = int(wowy_row[1] or 0)
+        deltas: dict[str, float] = {
+            "wowy_sample_games": 0.0,
+            "wowy_delta_min": 0.0,
+            "wowy_delta_usg": 0.0,
+            "wowy_delta_pts_p36": 0.0,
+            "wowy_delta_reb_p36": 0.0,
+            "wowy_delta_ast_p36": 0.0,
+        }
+        wowy_ctx: WowyContext | None = None
+        if n_out > 0 and n_in > 0:
+            shrink = n_out / (n_out + shrinkage_k)
+            raw_d_min = float(wowy_row[2] - wowy_row[3])
+            raw_d_pts = float(wowy_row[4] - wowy_row[5])
+            raw_d_reb = float(wowy_row[6] - wowy_row[7])
+            raw_d_ast = float(wowy_row[8] - wowy_row[9])
+            d_usg = float(wowy_row[10] - wowy_row[11])
+            d_pts_p36 = float(wowy_row[12] - wowy_row[13])
+            d_reb_p36 = float(wowy_row[14] - wowy_row[15])
+            d_ast_p36 = float(wowy_row[16] - wowy_row[17])
+
+            deltas["wowy_sample_games"] = float(n_out)
+            deltas["wowy_delta_min"] = shrink * raw_d_min
+            deltas["wowy_delta_usg"] = shrink * d_usg
+            deltas["wowy_delta_pts_p36"] = shrink * d_pts_p36
+            deltas["wowy_delta_reb_p36"] = shrink * d_reb_p36
+            deltas["wowy_delta_ast_p36"] = shrink * d_ast_p36
+
+            wowy_ctx = WowyContext(
+                primary_out_player=primary_out_name,
+                sample_games_without=n_out,
+                sample_games_with=n_in,
+                raw_delta_min=round(raw_d_min, 2),
+                raw_delta_pts=round(raw_d_pts, 2),
+                raw_delta_reb=round(raw_d_reb, 2),
+                raw_delta_ast=round(raw_d_ast, 2),
+                shrunk_delta_min=round(deltas["wowy_delta_min"], 2),
+                shrunk_delta_pts_p36=round(deltas["wowy_delta_pts_p36"], 2),
+            )
+
+        self._wowy_cache[key] = (deltas, wowy_ctx)
+        return deltas, wowy_ctx
+
+    @staticmethod
+    def _apply_team_minutes_budget(
+        pred_mins: np.ndarray,
+        target_total: float = 234.0,
+        min_cap: float = 41.0,
+    ) -> np.ndarray:
+        """Gently redistribute rotation minutes so an active 6+ man roster sums near ~234 min."""
+        n = len(pred_mins)
+        if n < 6:
+            return pred_mins
+        adjusted = pred_mins.astype(float).copy()
+        raw_sum = float(adjusted.sum())
+        if raw_sum <= 0.0 or (226.0 <= raw_sum <= 242.0):
+            return adjusted
+
+        # Cap target if roster is short (e.g. 6 active players max ~228 min)
+        effective_target = min(target_total, n * 38.0)
+        # Water-filling redistribution respecting individual max cap (41.0 min)
+        for _ in range(4):
+            diff = effective_target - float(adjusted.sum())
+            if abs(diff) < 0.5:
+                break
+            if diff > 0:
+                headroom = np.maximum(0.0, min_cap - adjusted)
+                if float(headroom.sum()) <= 1e-6:
+                    break
+                # Weight boost by current minutes * headroom so rotation players absorb realistic share
+                weights = adjusted * headroom
+                w_sum = float(weights.sum())
+                if w_sum <= 1e-6:
+                    weights = headroom
+                    w_sum = float(weights.sum())
+                adjusted = np.minimum(min_cap, adjusted + diff * (weights / w_sum))
+            else:
+                w_sum = float(adjusted.sum())
+                if w_sum <= 1e-6:
+                    break
+                adjusted = np.maximum(0.0, adjusted + diff * (adjusted / w_sum))
+        return np.clip(adjusted, 0.0, min_cap)
+
+    def _predict_batch(
+        self,
+        rows: list[dict[str, float]],
+        with_pts_shap: bool = False,
+        top_k: int = 3,
+        apply_team_minutes_budget: bool = False,
+    ) -> tuple[list[StatProjection], list[list[ShapDriver]]]:
+        """Vectorized batch inference for N players in a single LightGBM call per target."""
+        if not rows:
+            return [], []
+
+        x1 = pd.DataFrame(
+            [{c: r.get(c, np.nan) for c in self.stage1_features} for r in rows],
+            columns=self.stage1_features,
+        )
+        pred_mins = np.clip(self.min_model.predict(x1), 0.0, 48.0)
+        if apply_team_minutes_budget:
+            pred_mins = self._apply_team_minutes_budget(pred_mins)
+
+        x2 = x1.copy()
+        x2["pred_min"] = pred_mins
+        x2 = x2[self.stage2_features]
+
+        stage2_preds: dict[str, np.ndarray] = {}
+        for target in ["pts", "reb", "ast", "stl", "blk", "tov", "pf", "fga", "ftm"]:
+            model = self.stage2_models.get(target)
+            if model is not None:
+                stage2_preds[target] = np.clip(model.predict(x2), 0.0, None)
+            else:
+                stage2_preds[target] = np.zeros(len(rows), dtype=float)
+
+        projections: list[StatProjection] = []
+        for i in range(len(rows)):
+            p: dict[str, float] = {"min": round(float(pred_mins[i]), 2)}
+            for target, arr in stage2_preds.items():
+                p[target] = round(float(arr[i]), 2)
+            p["pra"] = round(p["pts"] + p["reb"] + p["ast"], 2)
+            p["pr"] = round(p["pts"] + p["reb"], 2)
+            p["pa"] = round(p["pts"] + p["ast"], 2)
+            projections.append(StatProjection(**p))
+
+        drivers_batch: list[list[ShapDriver]] = [[] for _ in range(len(rows))]
+        if with_pts_shap:
+            pts_model = self.stage2_models.get("pts", self.min_model)
+            x_shap = x2 if pts_model is not self.min_model else x1
+            contribs = np.asarray(pts_model.predict(x_shap, pred_contrib=True))
+            feature_names = list(x_shap.columns)
+            for i in range(len(rows)):
+                contrib = contribs[i, :-1]
+                order = np.argsort(np.abs(contrib))[::-1][:top_k]
+                row_vals = x_shap.iloc[i]
+                row_drivers: list[ShapDriver] = []
+                for idx in order:
+                    fname = feature_names[int(idx)]
+                    sv = float(contrib[int(idx)])
+                    raw_val = row_vals[fname]
+                    val = None if pd.isna(raw_val) else round(float(raw_val), 4)
+                    row_drivers.append(
+                        ShapDriver(
+                            feature=fname,
+                            value=val,
+                            shap_value=round(sv, 4),
+                            direction="+" if sv >= 0 else "-",
+                        )
+                    )
+                drivers_batch[i] = row_drivers
+
+        return projections, drivers_batch
+
     def simulate_team(
         self,
         team_id: int,
@@ -879,124 +1212,141 @@ class WhatIfSimulator:
         is_home: bool = True,
         limit: int = 10,
     ) -> dict[str, Any]:
-        """Fast batch boxscore simulation for a team's top rotation players (cost $0 LLM)."""
+        """Ultra-fast vectorized batch boxscore simulation with in-memory feature caching."""
         out_id_set = set(out_player_ids or [])
         opp_out_id_set = set(opponent_out_player_ids or [])
+        star_usg = float(self.features_config.rotation.star_usg_threshold)
+        star_min = float(self.features_config.rotation.star_min_threshold)
 
         with self._connect() as con:
-            team_rows = con.execute(
-                "SELECT abbreviation FROM teams WHERE team_id = ?",
-                [team_id],
-            ).fetchall()
-            if not team_rows:
-                raise EntityResolutionError(f"No se encontró el equipo con team_id={team_id}.")
-            team_abbr = str(team_rows[0][0])
+            if team_id in self._team_abbr_cache:
+                team_abbr = self._team_abbr_cache[team_id]
+            else:
+                team_rows = con.execute(
+                    "SELECT abbreviation FROM teams WHERE team_id = ?",
+                    [team_id],
+                ).fetchall()
+                if not team_rows:
+                    raise EntityResolutionError(f"No se encontró el equipo con team_id={team_id}.")
+                team_abbr = str(team_rows[0][0])
+                self._team_abbr_cache[team_id] = team_abbr
 
             opp_abbr = "AVG"
             if opponent_team_id is not None:
-                opp_rows = con.execute(
-                    "SELECT abbreviation FROM teams WHERE team_id = ?",
-                    [opponent_team_id],
-                ).fetchall()
-                if not opp_rows:
-                    raise EntityResolutionError(
-                        f"No se encontró el equipo rival con team_id={opponent_team_id}."
+                if opponent_team_id in self._team_abbr_cache:
+                    opp_abbr = self._team_abbr_cache[opponent_team_id]
+                else:
+                    opp_rows = con.execute(
+                        "SELECT abbreviation FROM teams WHERE team_id = ?",
+                        [opponent_team_id],
+                    ).fetchall()
+                    if not opp_rows:
+                        raise EntityResolutionError(
+                            f"No se encontró el equipo rival con team_id={opponent_team_id}."
+                        )
+                    opp_abbr = str(opp_rows[0][0])
+                    self._team_abbr_cache[opponent_team_id] = opp_abbr
+
+            roster_key = (team_id, limit)
+            roster_rows = self._roster_cache.get(roster_key)
+            if roster_rows is None:
+                raw_roster = con.execute(
+                    """
+                    WITH latest_player_team AS (
+                        SELECT
+                            player_id,
+                            player_name,
+                            team_id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY player_id
+                                ORDER BY game_date DESC, game_id DESC
+                            ) AS rn
+                        FROM player_game_logs
+                    ),
+                    active_on_team AS (
+                        SELECT player_id, player_name
+                        FROM latest_player_team
+                        WHERE rn = 1 AND team_id = ?
+                    ),
+                    recent_logs AS (
+                        SELECT
+                            p.player_id,
+                            a.player_name,
+                            p.min,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY p.player_id
+                                ORDER BY p.game_date DESC, p.game_id DESC
+                            ) AS g_rn
+                        FROM player_game_logs p
+                        JOIN active_on_team a
+                          ON p.player_id = a.player_id
+                         AND p.team_id = ?
+                    ),
+                    weighted AS (
+                        SELECT
+                            player_id,
+                            player_name,
+                            SUM(min * POWER(0.85, g_rn - 1)) / NULLIF(SUM(POWER(0.85, g_rn - 1)), 0) AS ewma_min
+                        FROM recent_logs
+                        WHERE g_rn <= 15
+                        GROUP BY player_id, player_name
                     )
-                opp_abbr = str(opp_rows[0][0])
-
-            roster_rows = con.execute(
-                """
-                WITH latest_player_team AS (
                     SELECT
-                        player_id,
-                        player_name,
-                        team_id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY player_id
-                            ORDER BY game_date DESC, game_id DESC
-                        ) AS rn
-                    FROM player_game_logs
-                ),
-                active_on_team AS (
-                    SELECT player_id, player_name
-                    FROM latest_player_team
-                    WHERE rn = 1 AND team_id = ?
-                ),
-                recent_logs AS (
-                    SELECT
-                        p.player_id,
-                        a.player_name,
-                        p.min,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY p.player_id
-                            ORDER BY p.game_date DESC, p.game_id DESC
-                        ) AS g_rn
-                    FROM player_game_logs p
-                    JOIN active_on_team a
-                      ON p.player_id = a.player_id
-                     AND p.team_id = ?
-                ),
-                weighted AS (
-                    SELECT
-                        player_id,
-                        player_name,
-                        SUM(min * POWER(0.85, g_rn - 1)) / NULLIF(SUM(POWER(0.85, g_rn - 1)), 0) AS ewma_min
-                    FROM recent_logs
-                    WHERE g_rn <= 15
-                    GROUP BY player_id, player_name
-                )
-                SELECT
-                    w.player_id,
-                    w.player_name,
-                    COALESCE(pl.pos_group, 'UNK') AS pos_group,
-                    COALESCE(w.ewma_min, 0.0) AS ewma_min
-                FROM weighted w
-                LEFT JOIN players pl ON w.player_id = pl.player_id
-                ORDER BY w.ewma_min DESC
-                LIMIT ?
-                """,
-                [team_id, team_id, limit],
-            ).fetchall()
-
-            # Map out_player_ids and opponent_out_player_ids to their names
-            out_names: list[str] = [
-                str(r[1]) for r in roster_rows if int(r[0]) in out_id_set
-            ]
-            opp_out_names: list[str] = []
-            if opp_out_id_set:
-                placeholders = ", ".join("?" for _ in opp_out_id_set)
-                opp_name_rows = con.execute(
-                    f"SELECT DISTINCT player_name FROM player_game_logs WHERE player_id IN ({placeholders})",
-                    list(opp_out_id_set),
+                        w.player_id,
+                        w.player_name,
+                        COALESCE(pl.pos_group, 'UNK') AS pos_group,
+                        COALESCE(w.ewma_min, 0.0) AS ewma_min
+                    FROM weighted w
+                    LEFT JOIN players pl ON w.player_id = pl.player_id
+                    ORDER BY w.ewma_min DESC
+                    LIMIT ?
+                    """,
+                    [team_id, team_id, limit],
                 ).fetchall()
-                opp_out_names = [str(x[0]) for x in opp_name_rows]
+                roster_rows = [
+                    (int(r[0]), str(r[1]), str(r[2]), round(float(r[3]), 1)) for r in raw_roster
+                ]
+                self._roster_cache[roster_key] = roster_rows
 
-            # Cache matchup features per pos_group across the rotation (max 4 SQL lookups)
-            matchup_cache: dict[str, tuple[dict[str, float], OpponentDefenseContext]] = {}
+            # Precompute out player profiles once per team (cached by player_id)
+            own_out_profiles: list[tuple[int, str, str, float, float]] = []
+            for oid in out_id_set:
+                name, pgrp, avg_m, avg_u, _ = self._get_out_profile_by_id(con, oid)
+                if name:
+                    own_out_profiles.append((oid, name, pgrp, avg_m, avg_u))
+
+            opp_out_profiles: list[tuple[int, str, str, float, float, float]] = []
+            for oid in opp_out_id_set:
+                name, pgrp, avg_m, avg_u, avg_s = self._get_out_profile_by_id(con, oid)
+                if name:
+                    opp_out_profiles.append((oid, name, pgrp, avg_m, avg_u, avg_s))
+
+            primary_own_out = (
+                max(own_out_profiles, key=lambda x: x[3] * x[4]) if own_out_profiles else None
+            )
+
             team_opp_defense: OpponentDefenseContext | None = None
-            result_rows: list[dict[str, Any]] = []
+            active_meta: list[tuple[int, str, str, float, WowyContext | None]] = []
+            base_rows_to_predict: list[dict[str, float]] = []
+            base_predict_indices: list[int] = []
+            cached_base_projs: dict[int, StatProjection] = {}
+            scenario_rows: list[dict[str, float]] = []
+            out_entries: dict[int, dict[str, Any]] = {}
 
-            for r in roster_rows:
-                pid = int(r[0])
-                pname = str(r[1])
-                pgroup = str(r[2])
-                ewma_min = round(float(r[3]), 1)
-
+            for pid, pname, pgroup, ewma_min in roster_rows:
                 if pid in out_id_set:
-                    result_rows.append(
-                        {
-                            "player_id": pid,
-                            "player_name": pname,
-                            "pos_group": pgroup,
-                            "ewma_min": ewma_min,
-                            "is_out": True,
-                            "base": None,
-                            "scenario": None,
-                            "deltas": None,
-                            "top_drivers": [],
-                            "wowy": None,
-                        }
-                    )
+                    out_entries[pid] = {
+                        "player_id": pid,
+                        "player_name": pname,
+                        "pos_group": pgroup,
+                        "ewma_min": ewma_min,
+                        "is_out": True,
+                        "base": None,
+                        "scenario": None,
+                        "deltas": None,
+                        "top_drivers": [],
+                        "wowy": None,
+                    }
                     continue
 
                 rp = ResolvedPlayer(
@@ -1006,30 +1356,75 @@ class WhatIfSimulator:
                     team_abbreviation=team_abbr,
                     pos_group=pgroup,
                 )
-                if pgroup not in matchup_cache:
-                    matchup_cache[pgroup] = self._fetch_matchup_features(
-                        con,
-                        team_id=team_id,
-                        opp_team_id=opponent_team_id,
-                        opp_abbr=opp_abbr,
-                        pos_group=pgroup,
-                    )
-                matchup_feats, opp_def_ctx = matchup_cache[pgroup]
+                matchup_feats, opp_def_ctx = self._get_matchup_features_cached(
+                    con,
+                    team_id=team_id,
+                    opp_team_id=opponent_team_id,
+                    opp_abbr=opp_abbr,
+                    pos_group=pgroup,
+                )
                 if team_opp_defense is None:
                     team_opp_defense = opp_def_ctx
 
-                player_feats = self._fetch_player_recent_features(con, rp)
-                wowy_overrides, _, _, wowy_ctx = self._compute_wowy_override(
-                    con,
-                    player=rp,
-                    out_player_names=out_names,
-                )
-                opp_overrides, _, _ = self._compute_opponent_out_override(
-                    con,
-                    player=rp,
-                    opp_team_id=opponent_team_id,
-                    opp_out_names=opp_out_names,
-                )
+                player_feats = self._get_player_recent_features_cached(con, rp)
+
+                # Compute own-team absence overrides directly from cached profiles
+                wowy_overrides: dict[str, float] = {
+                    "missing_team_minutes": 0.0,
+                    "missing_team_usage_pct": 0.0,
+                    "star_teammate_out": 0.0,
+                    "num_rotation_players_out": 0.0,
+                    "missing_same_pos_minutes": 0.0,
+                    "missing_same_pos_usage": 0.0,
+                    "wowy_sample_games": 0.0,
+                    "wowy_delta_min": 0.0,
+                    "wowy_delta_usg": 0.0,
+                    "wowy_delta_pts_p36": 0.0,
+                    "wowy_delta_reb_p36": 0.0,
+                    "wowy_delta_ast_p36": 0.0,
+                }
+                wowy_ctx: WowyContext | None = None
+                for oid, _oname, opgrp, avg_m, avg_u in own_out_profiles:
+                    if oid == pid:
+                        continue
+                    wowy_overrides["missing_team_minutes"] += avg_m
+                    wowy_overrides["missing_team_usage_pct"] += (avg_u * avg_m) / 240.0
+                    wowy_overrides["num_rotation_players_out"] += 1.0
+                    if avg_u >= star_usg or avg_m >= star_min:
+                        wowy_overrides["star_teammate_out"] = 1.0
+                    if opgrp == pgroup and pgroup != "UNK":
+                        wowy_overrides["missing_same_pos_minutes"] += avg_m
+                        wowy_overrides["missing_same_pos_usage"] += (avg_u * avg_m) / 240.0
+
+                if primary_own_out is not None and primary_own_out[0] != pid:
+                    pair_deltas, wowy_ctx = self._get_wowy_for_pair_cached(
+                        con,
+                        player_id=pid,
+                        team_id=team_id,
+                        primary_out_id=primary_own_out[0],
+                        primary_out_name=primary_own_out[1],
+                    )
+                    wowy_overrides.update(pair_deltas)
+
+                # Compute opponent absence overrides directly from cached profiles
+                opp_overrides: dict[str, float] = {
+                    "opp_missing_team_minutes": 0.0,
+                    "opp_missing_team_usage_pct": 0.0,
+                    "opp_star_out": 0.0,
+                    "opp_missing_center_minutes": 0.0,
+                    "opp_missing_def_stocks": 0.0,
+                    "opp_missing_same_pos_minutes": 0.0,
+                }
+                for _oid, _oname, opgrp, avg_m, avg_u, avg_s in opp_out_profiles:
+                    opp_overrides["opp_missing_team_minutes"] += avg_m
+                    opp_overrides["opp_missing_team_usage_pct"] += (avg_u * avg_m) / 240.0
+                    opp_overrides["opp_missing_def_stocks"] += avg_s
+                    if avg_u >= star_usg or avg_m >= star_min:
+                        opp_overrides["opp_star_out"] = 1.0
+                    if opgrp == "C":
+                        opp_overrides["opp_missing_center_minutes"] += avg_m
+                    if opgrp == pgroup and pgroup != "UNK":
+                        opp_overrides["opp_missing_same_pos_minutes"] += avg_m
 
                 base_row: dict[str, float] = {
                     **player_feats,
@@ -1037,7 +1432,10 @@ class WhatIfSimulator:
                     "is_home": 1.0 if is_home else 0.0,
                     "rest_days": 1.0,
                     "is_back_to_back": 0.0,
-                    "player_rest_days": 1.0,
+                    "player_rest_days": float(player_feats.get("player_rest_days", 1.0)),
+                    "is_returning_from_absence": float(
+                        player_feats.get("is_returning_from_absence", 0.0)
+                    ),
                     "games_in_last_7_days": 3.0,
                     "games_in_last_14_days": 6.0,
                     "road_trip_game_num": 0.0 if is_home else 1.0,
@@ -1066,41 +1464,66 @@ class WhatIfSimulator:
                 scenario_row.update(opp_overrides)
                 scenario_row["is_back_to_back"] = 1.0 if is_back_to_back else 0.0
                 scenario_row["rest_days"] = 0.0 if is_back_to_back else 1.0
-                scenario_row["player_rest_days"] = 0.0 if is_back_to_back else 1.0
                 if is_back_to_back:
+                    scenario_row["player_rest_days"] = 0.0
+                    scenario_row["is_returning_from_absence"] = 0.0
                     scenario_row["games_in_last_7_days"] = 4.0
 
-                base_proj, _ = self._predict_row(base_row, with_shap=False)
-                scen_proj, _ = self._predict_row(scenario_row, with_shap=False)
+                idx = len(active_meta)
+                active_meta.append((pid, pname, pgroup, ewma_min, wowy_ctx))
+                scenario_rows.append(scenario_row)
 
-                # Fast native TreeSHAP top-3 drivers on PTS model
-                x1 = pd.DataFrame([{c: scenario_row.get(c, np.nan) for c in self.stage1_features}])
-                x2 = x1.copy()
-                x2["pred_min"] = scen_proj.min
-                x2 = x2[self.stage2_features]
-                pts_model = self.stage2_models.get("pts", self.min_model)
-                top_drivers = self._fast_top_drivers(pts_model, x2, top_k=3)
+                base_key = (pid, opponent_team_id, is_home)
+                cached_base = self._base_proj_cache.get(base_key)
+                if cached_base is not None:
+                    cached_base_projs[idx] = cached_base
+                else:
+                    base_predict_indices.append(idx)
+                    base_rows_to_predict.append(base_row)
 
-                deltas = StatProjection(
-                    **{
-                        k: round(getattr(scen_proj, k) - getattr(base_proj, k), 2)
-                        for k in ALL_STAT_KEYS
-                    }
-                )
-                result_rows.append(
-                    {
-                        "player_id": pid,
-                        "player_name": pname,
-                        "pos_group": pgroup,
-                        "ewma_min": ewma_min,
-                        "is_out": False,
-                        "base": base_proj,
-                        "scenario": scen_proj,
-                        "deltas": deltas,
-                        "top_drivers": top_drivers,
-                        "wowy": wowy_ctx,
-                    }
-                )
+        # Vectorized batch inference (outside DuckDB lock)
+        if base_rows_to_predict:
+            new_base_projs, _ = self._predict_batch(base_rows_to_predict, with_pts_shap=False)
+            for idx, proj in zip(base_predict_indices, new_base_projs, strict=True):
+                pid = active_meta[idx][0]
+                self._base_proj_cache[(pid, opponent_team_id, is_home)] = proj
+                cached_base_projs[idx] = proj
+
+        scen_projs, scen_drivers = self._predict_batch(
+            scenario_rows,
+            with_pts_shap=True,
+            top_k=3,
+            apply_team_minutes_budget=True,
+        )
+
+        active_entries: dict[int, dict[str, Any]] = {}
+        for idx, (pid, pname, pgroup, ewma_min, wowy_ctx) in enumerate(active_meta):
+            base_proj = cached_base_projs[idx]
+            scen_proj = scen_projs[idx]
+            deltas = StatProjection(
+                **{
+                    k: round(getattr(scen_proj, k) - getattr(base_proj, k), 2)
+                    for k in ALL_STAT_KEYS
+                }
+            )
+            active_entries[pid] = {
+                "player_id": pid,
+                "player_name": pname,
+                "pos_group": pgroup,
+                "ewma_min": ewma_min,
+                "is_out": False,
+                "base": base_proj,
+                "scenario": scen_proj,
+                "deltas": deltas,
+                "top_drivers": scen_drivers[idx],
+                "wowy": wowy_ctx,
+            }
+
+        # Preserve original roster ordering
+        result_rows = [
+            out_entries[pid] if pid in out_entries else active_entries[pid]
+            for pid, _, _, _ in roster_rows
+        ]
 
         return {
             "team_id": team_id,

@@ -24,6 +24,7 @@ BASE_FEATURE_COLUMNS: list[str] = [
     "rest_days",
     "is_back_to_back",
     "player_rest_days",
+    "is_returning_from_absence",
     "games_in_last_7_days",
     "games_in_last_14_days",
     "road_trip_game_num",
@@ -66,6 +67,10 @@ BASE_FEATURE_COLUMNS: list[str] = [
     "reb_per36_10",
     "ast_per36_10",
     "fga_per36_10",
+    "stl_per36_10",
+    "blk_per36_10",
+    "fta_per36_10",
+    "tov_per36_10",
     # Rolling 20 & trends
     "min_avg_20",
     "pts_avg_20",
@@ -79,6 +84,7 @@ BASE_FEATURE_COLUMNS: list[str] = [
     "reb_trend_5_20",
     "ast_trend_5_20",
     # EWMA (strictly shifted by 1)
+    "min_ewma_3",
     "min_ewma_10",
     "pts_ewma_10",
     "reb_ewma_10",
@@ -147,12 +153,16 @@ def _add_shifted_ewma_features(
     ).fetchdf()
 
     if raw.empty:
+        df["min_ewma_3"] = pd.Series(dtype="float64")
         for col in ["min", "pts", "reb", "ast", "fga", "usg_pct"]:
             df[f"{col}_ewma_{span}"] = pd.Series(dtype="float64")
         return df
 
     ewma_cols: dict[str, pd.Series] = {}
     grouped = raw.groupby("player_id", sort=False)
+    ewma_cols["min_ewma_3"] = grouped["min"].transform(
+        lambda s: s.shift(1).ewm(span=3, adjust=False, min_periods=1).mean()
+    )
     for col in ["min", "pts", "reb", "ast", "fga", "usg_pct"]:
         ewma_cols[f"{col}_ewma_{span}"] = grouped[col].transform(
             lambda s: s.shift(1).ewm(span=span, adjust=False, min_periods=1).mean()

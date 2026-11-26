@@ -70,6 +70,7 @@ def compute_wowy_features(
         JOIN player_rolling_15 pr
           ON pr.season = tg.season
          AND pr.game_date < tg.game_date
+         AND DATEDIFF('day', pr.game_date, tg.game_date) <= 28
     ),
     expected_rotation AS (
         SELECT
