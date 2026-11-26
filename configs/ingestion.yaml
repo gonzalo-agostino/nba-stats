@@ -1,0 +1,18 @@
+# Ingestion configuration for stats.nba.com (nba_api)
+default_seasons:
+  - "2024-25"
+  - "2025-26"
+  - "2026-27"
+
+season_type: "Regular Season"
+
+# Active season always refreshes incrementally; completed seasons skip unless --force is passed
+active_season: "2026-27"
+
+rate_limit:
+  min_delay_seconds: 0.9
+  max_delay_seconds: 1.6
+  timeout_seconds: 45
+  max_retries: 4
+  backoff_base_seconds: 2.0
+  backoff_max_seconds: 30.0

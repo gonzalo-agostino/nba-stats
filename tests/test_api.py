@@ -1,0 +1,151 @@
+"""API endpoint tests using FastAPI TestClient over a temporary DuckDB + trained models."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from fastapi.testclient import TestClient
+
+from nba_stats.agent.graph import build_prediction_graph
+from nba_stats.api.app import create_app
+from nba_stats.api.slate import SlateService
+from nba_stats.simulator.schemas import ScenarioRequest
+from nba_stats.simulator.what_if import WhatIfSimulator
+from tests.test_simulator import _build_temp_warehouse_and_models
+
+
+@dataclass
+class _Msg:
+    content: str
+
+
+class _FakeParser:
+    def with_structured_output(self, schema: Any) -> Any:
+        class _Runner:
+            def invoke(self, messages: Any) -> ScenarioRequest:
+                return ScenarioRequest(
+                    player_name="Jamal Murray",
+                    opponent_team="LAL",
+                    out_players=["Nikola Jokic"],
+                    is_back_to_back=True,
+                    is_home=True,
+                )
+
+        return _Runner()
+
+
+class _FakeAnalyst:
+    def invoke(self, messages: Any) -> _Msg:
+        return _Msg(content="- Proyección ajustada por la ausencia de Nikola Jokić y B2B.")
+
+
+class _FakeSlateService(SlateService):
+    def _fetch_live_scoreboard_dict(self) -> dict[str, Any]:
+        return {
+            "scoreboard": {
+                "gameDate": "2025-12-26",
+                "games": [
+                    {
+                        "gameId": "0022500999",
+                        "gameStatusText": "7:30 pm ET",
+                        "awayTeam": {"teamId": 1, "teamTricode": "DEN"},
+                        "homeTeam": {"teamId": 2, "teamTricode": "LAL"},
+                    }
+                ],
+            }
+        }
+
+
+def test_api_endpoints_end_to_end(tmp_path: Path) -> None:
+    settings = _build_temp_warehouse_and_models(tmp_path)
+    sim = WhatIfSimulator(settings=settings)
+    graph = build_prediction_graph(
+        simulator=sim,
+        parser_llm=_FakeParser(),
+        analyst_llm=_FakeAnalyst(),
+        settings=settings,
+    )
+    app = create_app(
+        settings=settings,
+        simulator=sim,
+        agent_graph=graph,
+        slate_service=_FakeSlateService(duckdb_path=settings.duckdb_path),
+    )
+    client = TestClient(app)
+
+    # Health & Today's Slate
+    assert client.get("/api/v1/health").json() == {"status": "ok"}
+    slate = client.get("/api/v1/slate/today").json()
+    assert slate["fallback"] is False
+    assert len(slate["games"]) == 1
+    assert slate["games"][0]["away_abbr"] == "DEN"
+    assert slate["games"][0]["home_abbr"] == "LAL"
+    # Second call uses 15m cache
+    assert client.get("/api/v1/slate/today").json()["cached"] is True
+
+    # Teams
+    teams = client.get("/api/v1/teams").json()
+    assert len(teams) == 2
+    assert {t["abbreviation"] for t in teams} == {"DEN", "LAL"}
+
+    # Players search (accent-insensitive)
+    players = client.get("/api/v1/players", params={"q": "Jokic"}).json()
+    assert len(players) == 1
+    assert players[0]["full_name"] == "Nikola Jokić"
+
+    # Team roster with EWMA min & usg
+    roster = client.get("/api/v1/teams/1/roster").json()
+    assert len(roster) == 2
+    assert roster[0]["ewma_min"] > 0
+    assert roster[0]["ewma_usg"] > 0
+
+    # Simulate What-If
+    sim_resp = client.post(
+        "/api/v1/simulate",
+        json={
+            "player_name": "Jamal Murray",
+            "opponent_team": "LAL",
+            "out_players": ["Nikola Jokic"],
+            "is_back_to_back": True,
+            "is_home": True,
+        },
+    )
+    assert sim_resp.status_code == 200
+    data = sim_resp.json()
+    assert data["player_name"] == "Jamal Murray"
+    assert data["star_teammate_out"] is True
+    assert data["out_players_resolved"] == ["Nikola Jokić"]
+
+    # Simulate Team Boxscore (marking Jokic OUT)
+    team_sim = client.post(
+        "/api/v1/simulate-team",
+        json={
+            "team_id": 1,
+            "opponent_team_id": 2,
+            "out_player_ids": [101],
+            "is_back_to_back": False,
+            "is_home": True,
+        },
+    )
+    assert team_sim.status_code == 200
+    ts_data = team_sim.json()
+    assert ts_data["team_abbreviation"] == "DEN"
+    assert ts_data["opponent_abbreviation"] == "LAL"
+    assert len(ts_data["rows"]) == 2
+    by_id = {r["player_id"]: r for r in ts_data["rows"]}
+    assert by_id[101]["is_out"] is True
+    assert by_id[102]["is_out"] is False
+    assert by_id[102]["scenario"]["pra"] > 0
+    assert len(by_id[102]["top_drivers"]) == 3
+
+    # Ask LangGraph agent
+    ask_resp = client.post(
+        "/api/v1/ask",
+        json={"query": "Cómo proyecta Jamal Murray contra LAL en B2B sin Jokic?"},
+    )
+    assert ask_resp.status_code == 200
+    ask_data = ask_resp.json()
+    assert ask_data["ml_result"]["player_name"] == "Jamal Murray"
+    assert ask_data["verification_passed"] is True

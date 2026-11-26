@@ -1,0 +1,104 @@
+"""API-specific Pydantic request/response schemas."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+from nba_stats.simulator.schemas import (
+    OpponentDefenseContext,
+    ScenarioRequest,
+    ShapDriver,
+    SimulationResult,
+    StatProjection,
+    WowyContext,
+)
+
+
+class TeamItem(BaseModel):
+    team_id: int
+    abbreviation: str
+    full_name: str
+
+
+class PlayerSearchItem(BaseModel):
+    player_id: int
+    full_name: str
+    team_id: int
+    team_abbreviation: str
+    pos_group: str
+    avg_min_10: float
+    avg_pts_10: float
+
+
+class RosterPlayerItem(BaseModel):
+    player_id: int
+    player_name: str
+    pos_group: str
+    ewma_min: float
+    ewma_usg: float
+    games_played: int
+
+
+class AskRequest(BaseModel):
+    query: str = Field(..., min_length=3, description="Consulta en lenguaje natural sobre un escenario NBA.")
+
+
+class AskResponse(BaseModel):
+    query: str
+    parsed_scenario: ScenarioRequest | None = None
+    ml_result: SimulationResult | None = None
+    analysis: str | None = None
+    verification_passed: bool = False
+    clarification_message: str | None = None
+    final_response: str
+
+
+class TeamSimulationRequest(BaseModel):
+    team_id: int
+    opponent_team_id: int | None = None
+    out_player_ids: list[int] = Field(default_factory=list)
+    is_back_to_back: bool = False
+    is_home: bool = True
+    limit: int = Field(default=10, ge=1, le=15)
+
+
+class TeamBoxscoreRow(BaseModel):
+    player_id: int
+    player_name: str
+    pos_group: str
+    ewma_min: float
+    is_out: bool
+    base: StatProjection | None = None
+    scenario: StatProjection | None = None
+    deltas: StatProjection | None = None
+    top_drivers: list[ShapDriver] = Field(default_factory=list)
+    wowy: WowyContext | None = None
+
+
+class TeamSimulationResponse(BaseModel):
+    team_id: int
+    team_abbreviation: str
+    opponent_team_id: int | None = None
+    opponent_abbreviation: str
+    is_home: bool
+    is_back_to_back: bool
+    opponent_defense: OpponentDefenseContext | None = None
+    rows: list[TeamBoxscoreRow] = Field(default_factory=list)
+
+
+class SlateGameItem(BaseModel):
+    game_id: str
+    away_team_id: int
+    away_abbr: str
+    home_team_id: int
+    home_abbr: str
+    game_status: str
+    away_b2b: bool = False
+    home_b2b: bool = False
+
+
+class TodaySlateResponse(BaseModel):
+    game_date: str
+    games: list[SlateGameItem] = Field(default_factory=list)
+    fallback: bool = False
+    cached: bool = False

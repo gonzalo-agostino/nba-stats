@@ -1,0 +1,35 @@
+# Python / uv
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Local data & model artifacts
+data/
+artifacts/
+
+# Secrets & environment
+.env
+.env.local
+*.env
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# Agent & local workspace artifacts
+.agents/
+skills-lock.json
