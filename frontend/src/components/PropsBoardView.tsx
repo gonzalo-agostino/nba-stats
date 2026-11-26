@@ -23,10 +23,25 @@ import { PlayerAvatar } from "@/components/PlayerAvatar";
 import { PropBarChart } from "@/components/PropBarChart";
 import { cn, formatSigned } from "@/lib/utils";
 
+const STAT_DISPLAY_ORDER = [
+  "pts",
+  "reb",
+  "ast",
+  "ra",
+  "pr",
+  "pa",
+  "pra",
+  "fg3m",
+  "blk",
+  "tov",
+  "stl",
+];
+
 function statLabel(stat: string): string {
-  if (stat === "ra") return "R+A";
-  if (stat === "pr") return "P+R";
-  if (stat === "pa") return "P+A";
+  if (stat === "ra") return "RA";
+  if (stat === "pr") return "PR";
+  if (stat === "pa") return "PA";
+  if (stat === "fg3m") return "3PM";
   return stat.toUpperCase();
 }
 
@@ -105,7 +120,11 @@ export function PropsBoardView({ activeDate }: PropsBoardViewProps) {
   }
 
   const allItems = board?.items ?? [];
-  const availableStats = Array.from(new Set(allItems.map((i) => i.stat))).sort();
+  const availableStats = Array.from(new Set(allItems.map((i) => i.stat))).sort((a, b) => {
+    const ia = STAT_DISPLAY_ORDER.indexOf(a);
+    const ib = STAT_DISPLAY_ORDER.indexOf(b);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  });
 
   const filteredItems = allItems
     .filter((i) => {

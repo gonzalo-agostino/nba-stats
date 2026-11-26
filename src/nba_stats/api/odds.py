@@ -23,20 +23,26 @@ MARKET_TO_STAT: dict[str, str] = {
     "player_points": "pts",
     "player_rebounds": "reb",
     "player_assists": "ast",
-    "player_points_rebounds_assists": "pra",
+    "player_rebounds_assists": "ra",
     "player_points_rebounds": "pr",
     "player_points_assists": "pa",
-    "player_rebounds_assists": "ra",
+    "player_points_rebounds_assists": "pra",
+    "player_threes": "fg3m",
+    "player_blocks": "blk",
+    "player_turnovers": "tov",
 }
 
 DEFAULT_MARKETS: tuple[str, ...] = (
-    "player_points_rebounds_assists",
     "player_points",
     "player_rebounds",
     "player_assists",
+    "player_rebounds_assists",
     "player_points_rebounds",
     "player_points_assists",
-    "player_rebounds_assists",
+    "player_points_rebounds_assists",
+    "player_threes",
+    "player_blocks",
+    "player_turnovers",
 )
 
 PREFERRED_BOOKMAKERS: tuple[str, ...] = (
@@ -56,6 +62,9 @@ DEFAULT_MIN_EDGE_BY_STAT: dict[str, float] = {
     "ra": 1.5,
     "reb": 1.2,
     "ast": 1.0,
+    "fg3m": 0.6,
+    "blk": 0.4,
+    "tov": 0.5,
 }
 
 
@@ -527,9 +536,22 @@ class OddsService:
                     scen = row["scenario"]
                     for ln in p_lines:
                         stat = ln["stat"]
-                        if not hasattr(scen, stat):
+                        if hasattr(scen, stat):
+                            proj_val = float(getattr(scen, stat))
+                        elif stat == "fg3m":
+                            ch = self.get_player_chart_data(
+                                player_id=int(row["player_id"]),
+                                stat="fg3m",
+                                line=float(ln["line"]),
+                                side="OVER",
+                                limit=10,
+                            )
+                            avg_m10 = float(ch["l10"]["avg_min"] or 0.0)
+                            avg_3m10 = float(ch["l10"]["avg"] or 0.0)
+                            scale = (float(scen.min) / avg_m10) if avg_m10 > 0 else 1.0
+                            proj_val = max(0.0, avg_3m10 * scale)
+                        else:
                             continue
-                        proj_val = float(getattr(scen, stat))
                         line_val = float(ln["line"])
                         edge = round(proj_val - line_val, 2)
                         threshold = (
@@ -621,7 +643,7 @@ class OddsService:
                 # Look up actual boxscore in +/- 1 day window (handles UTC/ET midnight offset)
                 log_rows = con.execute(
                     """
-                    SELECT min, pts, reb, ast, stl, blk, tov
+                    SELECT min, pts, reb, ast, stl, blk, tov, fg3m
                     FROM player_game_logs
                     WHERE player_id = ?
                       AND game_date BETWEEN ? AND ?
@@ -652,7 +674,7 @@ class OddsService:
                         voids += 1
                     continue
 
-                m_min, pts, reb, ast, stl, blk, tov = [float(x or 0.0) for x in log_rows[0]]
+                m_min, pts, reb, ast, stl, blk, tov, fg3m = [float(x or 0.0) for x in log_rows[0]]
                 if m_min <= 0.0:
                     con.execute(
                         """
@@ -678,6 +700,7 @@ class OddsService:
                     "stl": stl,
                     "blk": blk,
                     "tov": tov,
+                    "fg3m": fg3m,
                 }
                 actual = round(stat_map.get(str(stat), 0.0), 2)
 
@@ -805,13 +828,14 @@ class OddsService:
 
     @staticmethod
     def _extract_log_stat(row: tuple[Any, ...], stat: str) -> float:
-        # row: (game_id, game_date, opp_abbr, is_home, wl, min, pts, reb, ast, stl, blk, tov)
+        # row: (game_id, game_date, opp_abbr, is_home, wl, min, pts, reb, ast, stl, blk, tov, fg3m)
         pts = float(row[6] or 0.0)
         reb = float(row[7] or 0.0)
         ast = float(row[8] or 0.0)
         stl = float(row[9] or 0.0)
         blk = float(row[10] or 0.0)
         tov = float(row[11] or 0.0)
+        fg3m = float(row[12] or 0.0) if len(row) > 12 else 0.0
         m_min = float(row[5] or 0.0)
         mapping = {
             "min": m_min,
@@ -825,6 +849,7 @@ class OddsService:
             "stl": stl,
             "blk": blk,
             "tov": tov,
+            "fg3m": fg3m,
         }
         return round(mapping.get(stat, 0.0), 1)
 
@@ -860,7 +885,8 @@ class OddsService:
                         COALESCE(l.ast, 0.0),
                         COALESCE(l.stl, 0.0),
                         COALESCE(l.blk, 0.0),
-                        COALESCE(l.tov, 0.0)
+                        COALESCE(l.tov, 0.0),
+                        COALESCE(l.fg3m, 0.0)
                     FROM player_game_logs l
                     LEFT JOIN teams opp ON l.opp_team_id = opp.team_id
                     LEFT JOIN played_other po ON l.game_id = po.game_id
@@ -887,7 +913,8 @@ class OddsService:
                         COALESCE(l.ast, 0.0),
                         COALESCE(l.stl, 0.0),
                         COALESCE(l.blk, 0.0),
-                        COALESCE(l.tov, 0.0)
+                        COALESCE(l.tov, 0.0),
+                        COALESCE(l.fg3m, 0.0)
                     FROM player_game_logs l
                     LEFT JOIN teams opp ON l.opp_team_id = opp.team_id
                     WHERE l.player_id = ?
@@ -1062,13 +1089,9 @@ class OddsService:
 
                     for ln in p_lines:
                         stat = ln["stat"]
-                        if not hasattr(scen, stat):
-                            continue
                         line_val = float(ln["line"])
-                        ml_proj = round(float(getattr(scen, stat)), 1)
-                        ml_edge = round(ml_proj - line_val, 1)
 
-                        # Compute real historical Hit Rates from DuckDB
+                        # Compute real historical Hit Rates from DuckDB first
                         over_chart = self.get_player_chart_data(
                             player_id=pid,
                             stat=stat,
@@ -1076,6 +1099,18 @@ class OddsService:
                             side="OVER",
                             limit=20,
                         )
+
+                        if hasattr(scen, stat):
+                            ml_proj = round(float(getattr(scen, stat)), 1)
+                        elif stat == "fg3m":
+                            # Minutes-adjusted 3PM projection from real L10 rate
+                            avg_m10 = float(over_chart["l10"]["avg_min"] or 0.0)
+                            avg_3m10 = float(over_chart["l10"]["avg"] or 0.0)
+                            scale = (float(scen.min) / avg_m10) if avg_m10 > 0 else 1.0
+                            ml_proj = round(max(0.0, avg_3m10 * scale), 1)
+                        else:
+                            continue
+                        ml_edge = round(ml_proj - line_val, 1)
                         l10_over_pct = float(over_chart["l10"]["pct"])
                         l10_under_pct = round(100.0 - l10_over_pct, 1) if over_chart["l10"]["total"] > 0 else 0.0
 

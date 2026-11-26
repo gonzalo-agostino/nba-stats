@@ -87,7 +87,12 @@ export function PerformanceView({ activeDate }: PerformanceViewProps) {
   const allPicks = data?.picks ?? [];
   const overCount = allPicks.filter((p) => p.side === "OVER").length;
   const underCount = allPicks.filter((p) => p.side === "UNDER").length;
-  const availableStats = Array.from(new Set(allPicks.map((p) => p.stat))).sort();
+  const STAT_ORDER = ["pts", "reb", "ast", "ra", "pr", "pa", "pra", "fg3m", "blk", "tov", "stl"];
+  const availableStats = Array.from(new Set(allPicks.map((p) => p.stat))).sort((a, b) => {
+    const ia = STAT_ORDER.indexOf(a);
+    const ib = STAT_ORDER.indexOf(b);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  });
 
   const filteredPicks = allPicks
     .filter((p) => {
@@ -353,7 +358,7 @@ export function PerformanceView({ activeDate }: PerformanceViewProps) {
                         : "text-[var(--text-secondary)]"
                     )}
                   >
-                    {st === "ra" ? "R+A" : st === "pr" ? "P+R" : st === "pa" ? "P+A" : st}
+                    {st === "fg3m" ? "3PM" : st.toUpperCase()}
                   </button>
                 ))}
               </div>
