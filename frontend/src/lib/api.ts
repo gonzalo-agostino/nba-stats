@@ -42,6 +42,7 @@ export interface StatProjection {
   pra: number;
   pr: number;
   pa: number;
+  ra: number;
   stl: number;
   blk: number;
   tov: number;
@@ -364,6 +365,85 @@ export function explainScenario(payload: ScenarioRequest): Promise<ExplainRespon
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export interface TrackedPickItem {
+  pick_id: string;
+  game_date: string;
+  game_id: string | null;
+  player_id: number;
+  player_name: string;
+  team_abbreviation: string;
+  opponent_abbreviation: string;
+  stat: string;
+  bookmaker: string;
+  line: number;
+  side: "OVER" | "UNDER";
+  odds_decimal: number;
+  projected_value: number;
+  edge: number;
+  status: "PENDING" | "WIN" | "LOSS" | "PUSH" | "VOID";
+  actual_value: number | null;
+  profit_units: number | null;
+}
+
+export interface PerformanceBucket {
+  label?: string;
+  total: number;
+  wins: number;
+  losses: number;
+  pushes: number;
+  voids: number;
+  pending: number;
+  win_rate_pct: number | null;
+  roi_pct: number | null;
+  net_units: number;
+}
+
+export interface PerformanceSummaryResponse {
+  overall: PerformanceBucket;
+  by_stat: PerformanceBucket[];
+  by_edge_bucket: PerformanceBucket[];
+  requests_remaining: number | null;
+  picks: TrackedPickItem[];
+}
+
+export interface PropsSnapshotResponse {
+  game_date: string;
+  games_analyzed: number;
+  lines_available: number;
+  lines_from_cache: boolean;
+  matched_players: number;
+  picks_registered: number;
+  requests_remaining: number | null;
+  requests_used: number | null;
+}
+
+export function fetchPropsPerformance(limit = 150): Promise<PerformanceSummaryResponse> {
+  return requestJson<PerformanceSummaryResponse>(`/api/v1/props/performance?limit=${limit}`);
+}
+
+export function snapshotDailyProps(
+  gameDate?: string,
+  forceRefresh = false
+): Promise<PropsSnapshotResponse> {
+  const params = new URLSearchParams();
+  if (gameDate) params.set("game_date", gameDate);
+  if (forceRefresh) params.set("force_refresh", "true");
+  const qs = params.toString() ? `?${params.toString()}` : "";
+  return requestJson<PropsSnapshotResponse>(`/api/v1/props/snapshot${qs}`, {
+    method: "POST",
+  });
+}
+
+export function gradeTrackedPicks(): Promise<{
+  graded: number;
+  wins: number;
+  losses: number;
+  pushes: number;
+  voids: number;
+}> {
+  return requestJson(`/api/v1/props/grade`, { method: "POST" });
 }
 
 export function fetchPlayerProfile(playerId: number, limit = 15): Promise<PlayerProfileResponse> {

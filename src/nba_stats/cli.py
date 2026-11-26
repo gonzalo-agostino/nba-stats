@@ -362,3 +362,60 @@ def serve(
 
     console.print(f"[bold cyan]Levantando NBA Stats API[/bold cyan] en http://{host}:{port}")
     uvicorn.run("nba_stats.api.app:app", host=host, port=port, reload=reload)
+
+
+@app.command("sync-daily")
+def sync_daily() -> None:
+    """Ingesta incremental de últimos partidos NBA y calificación automática de picks pendientes."""
+    from nba_stats.api.odds import OddsService
+
+    settings = Settings()
+    _configure_logging(settings.nba_stats_log_level)
+    ing_cfg = load_ingestion_config(settings)
+    console.print(f"[cyan]Sincronizando temporada {ing_cfg.active_season}...[/cyan]")
+    report = run_ingestion(
+        seasons=[ing_cfg.active_season],
+        force=False,
+        settings=settings,
+        config=ing_cfg,
+    )
+    summary = report.seasons[0] if report.seasons else None
+    console.print(
+        f"[green]OK[/green] | Partidos: {summary.games_rows if summary else 0} | "
+        f"Logs: {summary.player_logs_rows if summary else 0}"
+    )
+
+    odds_svc = OddsService(duckdb_path=settings.duckdb_path, api_key=settings.the_odds_api_key)
+    graded = odds_svc.grade_pending_picks()
+    console.print(
+        f"[green]Calificación[/green] | Procesados: {graded['graded']} "
+        f"({graded['wins']}G - {graded['losses']}P - {graded['pushes']}E - {graded['voids']} anulados)"
+    )
+
+
+@app.command("snapshot-props")
+def snapshot_props(
+    game_date: Annotated[str | None, typer.Option("--date", help="Fecha YYYY-MM-DD opcional.")] = None,
+    force_refresh: Annotated[bool, typer.Option("--force", help="Ignorar caché local de líneas.")] = False,
+) -> None:
+    """Descarga líneas reales de The Odds API, simula partidos con lesiones ESPN y registra picks."""
+    from nba_stats.api.injuries import InjuryService
+    from nba_stats.api.odds import OddsService
+    from nba_stats.api.slate import SlateService
+
+    settings = Settings()
+    _configure_logging(settings.nba_stats_log_level)
+    odds_svc = OddsService(duckdb_path=settings.duckdb_path, api_key=settings.the_odds_api_key)
+    res = odds_svc.snapshot_and_track_picks(
+        simulator=WhatIfSimulator(settings=settings),
+        slate_service=SlateService(duckdb_path=settings.duckdb_path),
+        injury_service=InjuryService(),
+        game_date_str=game_date,
+        force_refresh=force_refresh,
+    )
+    console.print(
+        f"[green]OK[/green] | Fecha: {res['game_date']} | Partidos: {res['games_analyzed']} | "
+        f"Líneas: {res['lines_available']} (caché={res['lines_from_cache']}) | "
+        f"Picks registrados: {res['picks_registered']} | "
+        f"Créditos restantes: {res['requests_remaining']}"
+    )

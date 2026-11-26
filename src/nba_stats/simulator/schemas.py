@@ -12,6 +12,7 @@ ALL_STAT_KEYS: tuple[str, ...] = (
     "pra",
     "pr",
     "pa",
+    "ra",
     "stl",
     "blk",
     "tov",
@@ -58,7 +59,7 @@ class ScenarioRequest(BaseModel):
 
 
 class StatProjection(BaseModel):
-    """Predicted stats for a single scenario with exact composite consistency (PRA, PR, PA)."""
+    """Predicted stats for a single scenario with exact composite consistency (PRA, PR, PA, RA)."""
 
     min: float
     pts: float
@@ -67,6 +68,7 @@ class StatProjection(BaseModel):
     pra: float
     pr: float = 0.0
     pa: float = 0.0
+    ra: float = 0.0
     stl: float = 0.0
     blk: float = 0.0
     tov: float = 0.0

@@ -45,9 +45,11 @@ class _FakeAnalyst:
 
 class _FakeSlateService(SlateService):
     def _fetch_live_scoreboard_dict(self) -> dict[str, Any]:
+        from datetime import date
+
         return {
             "scoreboard": {
-                "gameDate": "2025-12-26",
+                "gameDate": date.today().isoformat(),
                 "games": [
                     {
                         "gameId": "0022500999",
@@ -58,6 +60,9 @@ class _FakeSlateService(SlateService):
                 ],
             }
         }
+
+    def _fetch_scoreboard_v2_games(self, target_date: Any) -> list[dict[str, Any]]:
+        return []
 
 
 class _FakeInjuryService(InjuryService):

@@ -30,9 +30,21 @@ class TrainingResult:
     oof_path: Path
 
 
+RESIDUAL_ANCHORS: dict[str, str] = {
+    "pts": "pts_ewma_10",
+    "reb": "reb_ewma_10",
+    "ast": "ast_ewma_10",
+    "fga": "fga_ewma_10",
+}
+
+
 def _params_for_target(cfg: TrainingConfig, target: str) -> dict[str, Any]:
     params = dict(cfg.lightgbm)
-    if target in cfg.target_objectives:
+    if target in RESIDUAL_ANCHORS:
+        # Huber loss on residuals eliminates L1 downward median bias & tree leaf ceiling on 30+ PPG stars
+        params["objective"] = "huber"
+        params["metric"] = "mae"
+    elif target in cfg.target_objectives:
         params["objective"] = cfg.target_objectives[target]
         params["metric"] = "mae"
     return params
@@ -164,17 +176,31 @@ def train_and_backtest(
         # Stage 2: predict all base stats conditioned on pred_min
         for target in cfg.stage2_targets:
             t_params = _params_for_target(cfg, target)
-            model = _fit_lgbm(
-                stage2_train[stage2_cols],
-                stage2_train[f"target_{target}"],
-                val_df[stage2_cols],
-                val_df[f"target_{target}"],
-                t_params,
-            )
+            anchor_col = RESIDUAL_ANCHORS.get(target)
+            if anchor_col and anchor_col in stage2_train.columns:
+                y_tr = stage2_train[f"target_{target}"] - stage2_train[anchor_col].fillna(0.0)
+                y_va = val_df[f"target_{target}"] - val_df[anchor_col].fillna(0.0)
+                model = _fit_lgbm(
+                    stage2_train[stage2_cols],
+                    y_tr,
+                    val_df[stage2_cols],
+                    y_va,
+                    t_params,
+                )
+                raw_pred = val_df[anchor_col].fillna(0.0).to_numpy() + model.predict(val_df[stage2_cols])
+            else:
+                model = _fit_lgbm(
+                    stage2_train[stage2_cols],
+                    stage2_train[f"target_{target}"],
+                    val_df[stage2_cols],
+                    val_df[f"target_{target}"],
+                    t_params,
+                )
+                raw_pred = model.predict(val_df[stage2_cols])
             best_iterations[target].append(
                 int(model.best_iteration_ or t_params["n_estimators"])
             )
-            val_df[f"pred_{target}"] = np.clip(model.predict(val_df[stage2_cols]), 0.0, None)
+            val_df[f"pred_{target}"] = np.clip(raw_pred, 0.0, None)
 
         # Derived composites (PRA = PTS + REB + AST)
         for comp_name, parts in cfg.derived_targets.items():
@@ -233,9 +259,14 @@ def train_and_backtest(
     for target in cfg.stage2_targets:
         t_params = _params_for_target(cfg, target)
         t_params["n_estimators"] = max(50, int(np.median(best_iterations[target])))
+        anchor_col = RESIDUAL_ANCHORS.get(target)
+        if anchor_col and anchor_col in eligible_s2.columns:
+            y_full = eligible_s2[f"target_{target}"] - eligible_s2[anchor_col].fillna(0.0)
+        else:
+            y_full = eligible_s2[f"target_{target}"]
         t_model = _fit_lgbm(
             eligible_s2[stage2_cols],
-            eligible_s2[f"target_{target}"],
+            y_full,
             None,
             None,
             t_params,
@@ -250,6 +281,9 @@ def train_and_backtest(
         "stage2_features": stage2_cols,
         "stage1_target": cfg.stage1_target,
         "stage2_targets": cfg.stage2_targets,
+        "residual_anchors": {
+            t: col for t, col in RESIDUAL_ANCHORS.items() if t in cfg.stage2_targets
+        },
         "derived_targets": cfg.derived_targets,
         "metrics": metrics,
     }

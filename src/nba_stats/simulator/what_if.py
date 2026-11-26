@@ -72,6 +72,7 @@ class WhatIfSimulator:
         self.stage2_targets: list[str] = list(
             self.metadata.get("stage2_targets", ["pts", "reb", "ast"])
         )
+        self.residual_anchors: dict[str, str] = dict(self.metadata.get("residual_anchors", {}))
         self.min_model: lgb.LGBMRegressor = joblib.load(self.models_dir / "min_model.joblib")
         self.stage2_models: dict[str, lgb.LGBMRegressor] = {
             t: joblib.load(self.models_dir / f"{t}_model.joblib")
@@ -88,7 +89,7 @@ class WhatIfSimulator:
             tuple[int, int | None, str], tuple[dict[str, float], OpponentDefenseContext]
         ] = {}
         self._wowy_cache: dict[tuple[int, int, int], tuple[dict[str, float], WowyContext | None]] = {}
-        self._base_proj_cache: dict[tuple[int, int | None, bool], StatProjection] = {}
+        self._base_proj_cache: dict[tuple[int, int | None, bool, int], dict[int, StatProjection]] = {}
 
     def clear_caches(self) -> None:
         """Invalidate all in-memory feature/roster/projection caches (e.g. after data sync)."""
@@ -758,7 +759,12 @@ class WhatIfSimulator:
         for target in ["pts", "reb", "ast", "stl", "blk", "tov", "pf", "fga", "ftm"]:
             model = self.stage2_models.get(target)
             if model is not None:
-                val = float(np.clip(model.predict(x2)[0], 0.0, None))
+                raw_pred = float(model.predict(x2)[0])
+                anchor_col = self.residual_anchors.get(target)
+                if anchor_col:
+                    anchor_val = row_dict.get(anchor_col, 0.0)
+                    raw_pred += 0.0 if pd.isna(anchor_val) else float(anchor_val)
+                val = float(np.clip(raw_pred, 0.0, None))
                 preds[target] = round(val, 2)
             else:
                 preds[target] = 0.0
@@ -766,6 +772,7 @@ class WhatIfSimulator:
         preds["pra"] = round(preds["pts"] + preds["reb"] + preds["ast"], 2)
         preds["pr"] = round(preds["pts"] + preds["reb"], 2)
         preds["pa"] = round(preds["pts"] + preds["ast"], 2)
+        preds["ra"] = round(preds["reb"] + preds["ast"], 2)
 
         drivers: dict[str, list[ShapDriver]] = {}
         if with_shap:
@@ -1096,16 +1103,17 @@ class WhatIfSimulator:
     @staticmethod
     def _apply_team_minutes_budget(
         pred_mins: np.ndarray,
-        target_total: float = 234.0,
+        target_total: float = 232.0,
         min_cap: float = 41.0,
     ) -> np.ndarray:
-        """Gently redistribute rotation minutes so an active 6+ man roster sums near ~234 min."""
+        """Redistribute missing rotation minutes upward when starters are OUT (never trims healthy stars)."""
         n = len(pred_mins)
         if n < 6:
             return pred_mins
         adjusted = pred_mins.astype(float).copy()
         raw_sum = float(adjusted.sum())
-        if raw_sum <= 0.0 or (226.0 <= raw_sum <= 242.0):
+        # Only boost upward when absences leave the active rotation significantly short of ~232 min
+        if raw_sum <= 0.0 or raw_sum >= 224.0:
             return adjusted
 
         # Cap target if roster is short (e.g. 6 active players max ~228 min)
@@ -1113,24 +1121,17 @@ class WhatIfSimulator:
         # Water-filling redistribution respecting individual max cap (41.0 min)
         for _ in range(4):
             diff = effective_target - float(adjusted.sum())
-            if abs(diff) < 0.5:
+            if diff < 0.5:
                 break
-            if diff > 0:
-                headroom = np.maximum(0.0, min_cap - adjusted)
-                if float(headroom.sum()) <= 1e-6:
-                    break
-                # Weight boost by current minutes * headroom so rotation players absorb realistic share
-                weights = adjusted * headroom
+            headroom = np.maximum(0.0, min_cap - adjusted)
+            if float(headroom.sum()) <= 1e-6:
+                break
+            weights = adjusted * headroom
+            w_sum = float(weights.sum())
+            if w_sum <= 1e-6:
+                weights = headroom
                 w_sum = float(weights.sum())
-                if w_sum <= 1e-6:
-                    weights = headroom
-                    w_sum = float(weights.sum())
-                adjusted = np.minimum(min_cap, adjusted + diff * (weights / w_sum))
-            else:
-                w_sum = float(adjusted.sum())
-                if w_sum <= 1e-6:
-                    break
-                adjusted = np.maximum(0.0, adjusted + diff * (adjusted / w_sum))
+            adjusted = np.minimum(min_cap, adjusted + diff * (weights / w_sum))
         return np.clip(adjusted, 0.0, min_cap)
 
     def _predict_batch(
@@ -1160,7 +1161,11 @@ class WhatIfSimulator:
         for target in ["pts", "reb", "ast", "stl", "blk", "tov", "pf", "fga", "ftm"]:
             model = self.stage2_models.get(target)
             if model is not None:
-                stage2_preds[target] = np.clip(model.predict(x2), 0.0, None)
+                raw_arr = np.asarray(model.predict(x2), dtype=float)
+                anchor_col = self.residual_anchors.get(target)
+                if anchor_col and anchor_col in x2.columns:
+                    raw_arr = raw_arr + x2[anchor_col].fillna(0.0).to_numpy(dtype=float)
+                stage2_preds[target] = np.clip(raw_arr, 0.0, None)
             else:
                 stage2_preds[target] = np.zeros(len(rows), dtype=float)
 
@@ -1172,6 +1177,7 @@ class WhatIfSimulator:
             p["pra"] = round(p["pts"] + p["reb"] + p["ast"], 2)
             p["pr"] = round(p["pts"] + p["reb"], 2)
             p["pa"] = round(p["pts"] + p["ast"], 2)
+            p["ra"] = round(p["reb"] + p["ast"], 2)
             projections.append(StatProjection(**p))
 
         drivers_batch: list[list[ShapDriver]] = [[] for _ in range(len(rows))]
@@ -1252,11 +1258,17 @@ class WhatIfSimulator:
             if roster_rows is None:
                 raw_roster = con.execute(
                     """
-                    WITH latest_player_team AS (
+                    WITH team_latest_season AS (
+                        SELECT MAX(season) AS max_season
+                        FROM team_game_logs
+                        WHERE team_id = ?
+                    ),
+                    latest_player_team AS (
                         SELECT
                             player_id,
                             player_name,
                             team_id,
+                            season,
                             ROW_NUMBER() OVER (
                                 PARTITION BY player_id
                                 ORDER BY game_date DESC, game_id DESC
@@ -1264,9 +1276,12 @@ class WhatIfSimulator:
                         FROM player_game_logs
                     ),
                     active_on_team AS (
-                        SELECT player_id, player_name
-                        FROM latest_player_team
-                        WHERE rn = 1 AND team_id = ?
+                        SELECT l.player_id, l.player_name
+                        FROM latest_player_team l
+                        CROSS JOIN team_latest_season tls
+                        WHERE l.rn = 1
+                          AND l.team_id = ?
+                          AND (tls.max_season IS NULL OR l.season = tls.max_season)
                     ),
                     recent_logs AS (
                         SELECT
@@ -1301,7 +1316,7 @@ class WhatIfSimulator:
                     ORDER BY w.ewma_min DESC
                     LIMIT ?
                     """,
-                    [team_id, team_id, limit],
+                    [team_id, team_id, team_id, limit],
                 ).fetchall()
                 roster_rows = [
                     (int(r[0]), str(r[1]), str(r[2]), round(float(r[3]), 1)) for r in raw_roster
@@ -1326,29 +1341,16 @@ class WhatIfSimulator:
             )
 
             team_opp_defense: OpponentDefenseContext | None = None
+            team_base_key = (team_id, opponent_team_id, is_home, limit)
+            cached_team_base = self._base_proj_cache.get(team_base_key)
+            all_base_pids: list[int] = []
+            all_base_rows: list[dict[str, float]] = []
+
             active_meta: list[tuple[int, str, str, float, WowyContext | None]] = []
-            base_rows_to_predict: list[dict[str, float]] = []
-            base_predict_indices: list[int] = []
-            cached_base_projs: dict[int, StatProjection] = {}
             scenario_rows: list[dict[str, float]] = []
             out_entries: dict[int, dict[str, Any]] = {}
 
             for pid, pname, pgroup, ewma_min in roster_rows:
-                if pid in out_id_set:
-                    out_entries[pid] = {
-                        "player_id": pid,
-                        "player_name": pname,
-                        "pos_group": pgroup,
-                        "ewma_min": ewma_min,
-                        "is_out": True,
-                        "base": None,
-                        "scenario": None,
-                        "deltas": None,
-                        "top_drivers": [],
-                        "wowy": None,
-                    }
-                    continue
-
                 rp = ResolvedPlayer(
                     player_id=pid,
                     full_name=pname,
@@ -1367,6 +1369,56 @@ class WhatIfSimulator:
                     team_opp_defense = opp_def_ctx
 
                 player_feats = self._get_player_recent_features_cached(con, rp)
+                base_row: dict[str, float] = {
+                    **player_feats,
+                    **matchup_feats,
+                    "is_home": 1.0 if is_home else 0.0,
+                    "rest_days": 1.0,
+                    "is_back_to_back": 0.0,
+                    "player_rest_days": float(player_feats.get("player_rest_days", 1.0)),
+                    "is_returning_from_absence": float(
+                        player_feats.get("is_returning_from_absence", 0.0)
+                    ),
+                    "games_in_last_7_days": 3.0,
+                    "games_in_last_14_days": 6.0,
+                    "road_trip_game_num": 0.0 if is_home else 1.0,
+                    "missing_team_minutes": 0.0,
+                    "missing_team_usage_pct": 0.0,
+                    "star_teammate_out": 0.0,
+                    "num_rotation_players_out": 0.0,
+                    "missing_same_pos_minutes": 0.0,
+                    "missing_same_pos_usage": 0.0,
+                    "opp_missing_team_minutes": 0.0,
+                    "opp_missing_team_usage_pct": 0.0,
+                    "opp_star_out": 0.0,
+                    "opp_missing_center_minutes": 0.0,
+                    "opp_missing_def_stocks": 0.0,
+                    "opp_missing_same_pos_minutes": 0.0,
+                    "wowy_sample_games": 0.0,
+                    "wowy_delta_min": 0.0,
+                    "wowy_delta_usg": 0.0,
+                    "wowy_delta_pts_p36": 0.0,
+                    "wowy_delta_reb_p36": 0.0,
+                    "wowy_delta_ast_p36": 0.0,
+                }
+                if cached_team_base is None:
+                    all_base_pids.append(pid)
+                    all_base_rows.append(base_row)
+
+                if pid in out_id_set:
+                    out_entries[pid] = {
+                        "player_id": pid,
+                        "player_name": pname,
+                        "pos_group": pgroup,
+                        "ewma_min": ewma_min,
+                        "is_out": True,
+                        "base": None,
+                        "scenario": None,
+                        "deltas": None,
+                        "top_drivers": [],
+                        "wowy": None,
+                    }
+                    continue
 
                 # Compute own-team absence overrides directly from cached profiles
                 wowy_overrides: dict[str, float] = {
@@ -1426,39 +1478,6 @@ class WhatIfSimulator:
                     if opgrp == pgroup and pgroup != "UNK":
                         opp_overrides["opp_missing_same_pos_minutes"] += avg_m
 
-                base_row: dict[str, float] = {
-                    **player_feats,
-                    **matchup_feats,
-                    "is_home": 1.0 if is_home else 0.0,
-                    "rest_days": 1.0,
-                    "is_back_to_back": 0.0,
-                    "player_rest_days": float(player_feats.get("player_rest_days", 1.0)),
-                    "is_returning_from_absence": float(
-                        player_feats.get("is_returning_from_absence", 0.0)
-                    ),
-                    "games_in_last_7_days": 3.0,
-                    "games_in_last_14_days": 6.0,
-                    "road_trip_game_num": 0.0 if is_home else 1.0,
-                    "missing_team_minutes": 0.0,
-                    "missing_team_usage_pct": 0.0,
-                    "star_teammate_out": 0.0,
-                    "num_rotation_players_out": 0.0,
-                    "missing_same_pos_minutes": 0.0,
-                    "missing_same_pos_usage": 0.0,
-                    "opp_missing_team_minutes": 0.0,
-                    "opp_missing_team_usage_pct": 0.0,
-                    "opp_star_out": 0.0,
-                    "opp_missing_center_minutes": 0.0,
-                    "opp_missing_def_stocks": 0.0,
-                    "opp_missing_same_pos_minutes": 0.0,
-                    "wowy_sample_games": 0.0,
-                    "wowy_delta_min": 0.0,
-                    "wowy_delta_usg": 0.0,
-                    "wowy_delta_pts_p36": 0.0,
-                    "wowy_delta_reb_p36": 0.0,
-                    "wowy_delta_ast_p36": 0.0,
-                }
-
                 scenario_row = dict(base_row)
                 scenario_row.update(wowy_overrides)
                 scenario_row.update(opp_overrides)
@@ -1469,25 +1488,20 @@ class WhatIfSimulator:
                     scenario_row["is_returning_from_absence"] = 0.0
                     scenario_row["games_in_last_7_days"] = 4.0
 
-                idx = len(active_meta)
                 active_meta.append((pid, pname, pgroup, ewma_min, wowy_ctx))
                 scenario_rows.append(scenario_row)
 
-                base_key = (pid, opponent_team_id, is_home)
-                cached_base = self._base_proj_cache.get(base_key)
-                if cached_base is not None:
-                    cached_base_projs[idx] = cached_base
-                else:
-                    base_predict_indices.append(idx)
-                    base_rows_to_predict.append(base_row)
-
-        # Vectorized batch inference (outside DuckDB lock)
-        if base_rows_to_predict:
-            new_base_projs, _ = self._predict_batch(base_rows_to_predict, with_pts_shap=False)
-            for idx, proj in zip(base_predict_indices, new_base_projs, strict=True):
-                pid = active_meta[idx][0]
-                self._base_proj_cache[(pid, opponent_team_id, is_home)] = proj
-                cached_base_projs[idx] = proj
+        # Vectorized batch inference (both Base and Scenario apply the same team minutes budget!)
+        if cached_team_base is None:
+            new_base_projs, _ = self._predict_batch(
+                all_base_rows,
+                with_pts_shap=False,
+                apply_team_minutes_budget=True,
+            )
+            cached_team_base = {
+                pid: proj for pid, proj in zip(all_base_pids, new_base_projs, strict=True)
+            }
+            self._base_proj_cache[team_base_key] = cached_team_base
 
         scen_projs, scen_drivers = self._predict_batch(
             scenario_rows,
@@ -1498,7 +1512,7 @@ class WhatIfSimulator:
 
         active_entries: dict[int, dict[str, Any]] = {}
         for idx, (pid, pname, pgroup, ewma_min, wowy_ctx) in enumerate(active_meta):
-            base_proj = cached_base_projs[idx]
+            base_proj = cached_team_base[pid]
             scen_proj = scen_projs[idx]
             deltas = StatProjection(
                 **{

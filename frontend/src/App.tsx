@@ -30,6 +30,7 @@ import {
   type TeamSimulationResponse,
 } from "@/lib/api";
 import { PlayerAvatar } from "@/components/PlayerAvatar";
+import { PerformanceView } from "@/components/PerformanceView";
 import { PlayerDetailModal } from "@/components/PlayerDetailModal";
 import { TeamBoxscoreTable, type StatViewMode } from "@/components/TeamBoxscoreTable";
 import { cn } from "@/lib/utils";
@@ -42,6 +43,7 @@ function shiftIsoDate(isoDate: string, deltaDays: number): string {
 
 export function App() {
   const [darkMode, setDarkMode] = useState(true);
+  const [activeTab, setActiveTab] = useState<"games" | "performance">("games");
   const [teams, setTeams] = useState<TeamItem[]>([]);
   const [latestGameDate, setLatestGameDate] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -52,6 +54,7 @@ export function App() {
   const [slateLoading, setSlateLoading] = useState(false);
   const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
   const [manualMode, setManualMode] = useState(false);
+  const slateReqSeqRef = useRef(0);
 
   // Unified top search / LangGraph AI query bar
   const [searchMode, setSearchMode] = useState<"player" | "ai">("player");
@@ -118,9 +121,14 @@ export function App() {
   }
 
   async function loadSlateForDate(targetDate?: string, fallbackTeams?: TeamItem[]) {
+    const reqId = ++slateReqSeqRef.current;
+    if (targetDate) {
+      setSlateDate(targetDate);
+    }
     setSlateLoading(true);
     try {
       const slate = await fetchTodaySlate(targetDate);
+      if (reqId !== slateReqSeqRef.current) return;
       setSlateGames(slate.games);
       setSlateDate(slate.game_date);
 
@@ -141,11 +149,14 @@ export function App() {
         }
       }
     } catch {
+      if (reqId !== slateReqSeqRef.current) return;
       setError(
         "No se pudo conectar con la API en http://127.0.0.1:8000 (uv run nba-stats serve --reload)."
       );
     } finally {
-      setSlateLoading(false);
+      if (reqId === slateReqSeqRef.current) {
+        setSlateLoading(false);
+      }
     }
   }
 
@@ -369,13 +380,40 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-[var(--bg-canvas)] text-[var(--text-primary)]">
-      <div className="mx-auto max-w-6xl p-4 sm:py-5">
+      <div className="mx-auto max-w-7xl p-4 sm:py-5">
         {/* 1. Top Unified Bar: Brand + Player Search / LangGraph AI + Theme */}
         <div ref={topSearchRef} className="relative mb-3">
           <div className="flex items-center gap-2">
             <span className="hidden text-sm font-bold tracking-tight text-[var(--text-primary)] sm:inline">
               NBA<span className="text-amber-500">Stats</span>
             </span>
+
+            <div className="inline-flex h-9 shrink-0 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-0.5 text-xs">
+              <button
+                type="button"
+                onClick={() => setActiveTab("games")}
+                className={cn(
+                  "rounded px-2.5 font-medium transition-colors cursor-pointer",
+                  activeTab === "games"
+                    ? "bg-amber-500 text-slate-950 font-semibold"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                )}
+              >
+                Partidos
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab("performance")}
+                className={cn(
+                  "rounded px-2.5 font-medium transition-colors cursor-pointer",
+                  activeTab === "performance"
+                    ? "bg-amber-500 text-slate-950 font-semibold"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                )}
+              >
+                Win Rate
+              </button>
+            </div>
 
             <div className="inline-flex h-9 shrink-0 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-0.5 text-xs">
               <button
@@ -552,6 +590,11 @@ export function App() {
           ) : null}
         </div>
 
+        {/* Main Content: Games Boxscore OR Automated Win Rate / ROI View */}
+        {activeTab === "performance" ? (
+          <PerformanceView activeDate={slateDate || undefined} />
+        ) : (
+        <>
         {/* 2. Date Picker + Slate Games Strip */}
         <section className="mb-4 flex items-center gap-2 overflow-x-auto pb-1">
           <div className="inline-flex h-7 shrink-0 items-center rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)]">
@@ -608,7 +651,9 @@ export function App() {
                   <span className="num font-semibold">
                     {g.away_abbr} @ {g.home_abbr}
                   </span>
-                  {hasB2B ? (
+                  {isActive && loading ? (
+                    <Loader2 className="h-3 w-3 animate-spin text-amber-500" />
+                  ) : hasB2B ? (
                     <span className="rounded bg-amber-500/15 px-1 text-[9px] font-semibold text-amber-500">
                       B2B
                     </span>
@@ -714,7 +759,30 @@ export function App() {
 
         {/* 4. Pace & Defense Summary Card + Unified "Si no juegan" Bar */}
         {gameData ? (
-          <div className="mb-4 space-y-2.5">
+          <div className="relative mb-4">
+            {loading &&
+            (gameData.away.team_id !== awayTeamId || gameData.home.team_id !== homeTeamId) ? (
+              <div className="absolute inset-0 z-20 flex items-start justify-center pt-16 bg-[var(--bg-canvas)]/55 backdrop-blur-[1px]">
+                <div className="inline-flex items-center gap-2.5 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-4 py-2.5 text-xs font-medium text-[var(--text-primary)] shadow-lg">
+                  <Loader2 className="h-4 w-4 animate-spin text-amber-500" />
+                  <span>
+                    Cargando{" "}
+                    <span className="num font-semibold">
+                      {awayTeamObj?.abbreviation ?? ""} @ {homeTeamObj?.abbreviation ?? ""}
+                    </span>
+                    ...
+                  </span>
+                </div>
+              </div>
+            ) : null}
+            <div
+              className={cn(
+                "space-y-2.5 transition-opacity duration-150",
+                loading &&
+                  (gameData.away.team_id !== awayTeamId || gameData.home.team_id !== homeTeamId) &&
+                  "opacity-35 pointer-events-none select-none"
+              )}
+            >
             {/* Ritmo y Defensa del partido */}
             <div className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-4 py-3">
               <div className="mb-2 flex flex-wrap items-baseline gap-2">
@@ -809,8 +877,8 @@ export function App() {
                 {(
                   [
                     { id: "main", label: "Principales" },
-                    { id: "extras", label: "Defensa y Uso" },
-                    { id: "all", label: "Todas (13)" },
+                    { id: "extras", label: "Combos y Defensa" },
+                    { id: "all", label: "Todas (14)" },
                   ] as const
                 ).map((tab) => (
                   <button
@@ -879,11 +947,21 @@ export function App() {
                 onExplainWithAI={handleExplainWithAI}
               />
             </div>
+            </div>
           </div>
         ) : (
-          <div className="py-12 text-center text-xs text-[var(--text-muted)]">
-            {loading ? "Cargando partido y reporte oficial de lesiones..." : "Seleccioná un partido."}
+          <div className="flex items-center justify-center gap-2 py-12 text-xs text-[var(--text-muted)]">
+            {loading ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin text-amber-500" />
+                <span>Cargando partido y reporte oficial de lesiones...</span>
+              </>
+            ) : (
+              "Seleccioná un partido."
+            )}
           </div>
+        )}
+        </>
         )}
       </div>
 

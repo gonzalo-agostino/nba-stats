@@ -19,8 +19,9 @@ const ALL_STATS_META: { key: StatKey; label: string; group: "primary" | "combo" 
   { key: "reb", label: "REB", group: "primary" },
   { key: "ast", label: "AST", group: "primary" },
   { key: "pra", label: "PRA", group: "combo" },
-  { key: "pr", label: "PR", group: "combo" },
-  { key: "pa", label: "PA", group: "combo" },
+  { key: "pr", label: "P+R", group: "combo" },
+  { key: "pa", label: "P+A", group: "combo" },
+  { key: "ra", label: "R+A", group: "combo" },
   { key: "stl", label: "STL", group: "extra" },
   { key: "blk", label: "BLK", group: "extra" },
   { key: "tov", label: "TOV", group: "extra" },
@@ -36,6 +37,7 @@ const EDGE_STAT_OPTIONS: StatKey[] = [
   "pra",
   "pr",
   "pa",
+  "ra",
   "stl",
   "blk",
   "tov",
@@ -173,7 +175,7 @@ export function PlayerDetailModal({
             <section>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-                  Proyección completa del modelo (13 estadísticas)
+                  Proyección completa del modelo (14 estadísticas)
                 </h3>
                 <span className="text-[11px] text-[var(--text-muted)]">
                   Base vs Escenario actual

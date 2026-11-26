@@ -122,20 +122,52 @@ class SlateService:
             logger.warning("Could not query yesterday's games from DuckDB: %s", exc)
             return set()
 
+    def _parse_live_scoreboard(self) -> tuple[date | None, list[dict[str, Any]]]:
+        raw = self._fetch_live_scoreboard_dict()
+        sb_data = raw.get("scoreboard", {})
+        gdate_str = str(sb_data.get("gameDate") or "")
+        sb_date: date | None = None
+        if gdate_str:
+            try:
+                sb_date = date.fromisoformat(gdate_str[:10])
+            except ValueError:
+                sb_date = None
+
+        games: list[dict[str, Any]] = []
+        for g in sb_data.get("games") or []:
+            away = g.get("awayTeam") or {}
+            home = g.get("homeTeam") or {}
+            away_id = int(away.get("teamId") or 0)
+            home_id = int(home.get("teamId") or 0)
+            if away_id and home_id:
+                games.append(
+                    {
+                        "game_id": str(g.get("gameId") or ""),
+                        "away_team_id": away_id,
+                        "away_abbr": str(away.get("teamTricode") or "").upper(),
+                        "home_team_id": home_id,
+                        "home_abbr": str(home.get("teamTricode") or "").upper(),
+                        "game_status": str(g.get("gameStatusText") or "Scheduled").strip(),
+                    }
+                )
+        return sb_date, games
+
     def get_today_slate(
         self,
         game_date: str | None = None,
         force_refresh: bool = False,
     ) -> dict[str, Any]:
         today = date.today()
+        explicit_date = bool(game_date)
         target_date = today
         if game_date:
             try:
                 target_date = date.fromisoformat(game_date[:10])
             except ValueError:
                 target_date = today
+                explicit_date = False
 
-        cache_key = game_date[:10] if game_date else "__today__"
+        cache_key = target_date.isoformat() if explicit_date else "__default_upcoming__"
         now = time.monotonic()
         if not force_refresh and cache_key in self._cache:
             ts, cached_payload = self._cache[cache_key]
@@ -146,36 +178,39 @@ class SlateService:
             raw_games: list[dict[str, Any]] = []
             ref_date = target_date
 
-            if game_date is None or target_date == today:
-                raw = self._fetch_live_scoreboard_dict()
-                sb_data = raw.get("scoreboard", {})
-                gdate_str = str(sb_data.get("gameDate") or today.isoformat())
-                try:
-                    ref_date = date.fromisoformat(gdate_str[:10])
-                except ValueError:
-                    ref_date = today
-                for g in sb_data.get("games") or []:
-                    away = g.get("awayTeam") or {}
-                    home = g.get("homeTeam") or {}
-                    away_id = int(away.get("teamId") or 0)
-                    home_id = int(home.get("teamId") or 0)
-                    if away_id and home_id:
-                        raw_games.append(
-                            {
-                                "game_id": str(g.get("gameId") or ""),
-                                "away_team_id": away_id,
-                                "away_abbr": str(away.get("teamTricode") or "").upper(),
-                                "home_team_id": home_id,
-                                "home_abbr": str(home.get("teamTricode") or "").upper(),
-                                "game_status": str(g.get("gameStatusText") or "Scheduled").strip(),
-                            }
-                        )
+            if not explicit_date:
+                # Default initial load: use live scoreboard if it's for today with games;
+                # otherwise auto-advance up to 3 days ahead to the next scheduled game day.
+                sb_date, sb_games = self._parse_live_scoreboard()
+                if sb_date == today and sb_games:
+                    ref_date = sb_date
+                    raw_games = sb_games
+                else:
+                    # Check today via ScoreboardV2 first, then next 1..3 days
+                    for offset in range(4):
+                        probe_date = today + timedelta(days=offset)
+                        probed = self._fetch_scoreboard_v2_games(probe_date)
+                        if probed:
+                            ref_date = probe_date
+                            raw_games = probed
+                            break
+                    # If still empty (off-season / break), fall back to live scoreboard if present
+                    if not raw_games and sb_games and sb_date is not None:
+                        ref_date = sb_date
+                        raw_games = sb_games
             else:
-                # For past dates, check local DuckDB cache first (0 HTTP calls!)
-                if target_date < today:
+                # Explicit date requested: NEVER bounce back to another date!
+                if target_date == today:
+                    sb_date, sb_games = self._parse_live_scoreboard()
+                    if sb_date == today:
+                        raw_games = sb_games
+                    else:
+                        raw_games = self._fetch_scoreboard_v2_games(target_date)
+                elif target_date < today:
                     raw_games = self._fetch_duckdb_games_for_date(target_date)
-                # For future dates (or past dates not yet in DuckDB), query ScoreboardV2
-                if not raw_games:
+                    if not raw_games:
+                        raw_games = self._fetch_scoreboard_v2_games(target_date)
+                else:
                     raw_games = self._fetch_scoreboard_v2_games(target_date)
 
             played_yesterday = self._teams_played_yesterday(ref_date)

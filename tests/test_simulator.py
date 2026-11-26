@@ -176,15 +176,14 @@ def test_what_if_simulator_unknown_player_raises(tmp_path: Path) -> None:
 
 
 def test_team_minutes_budget_redistribution_invariants() -> None:
-    # 7 active players after 3 starters OUT: raw sum = 178 min -> redistributed near 234, cap <= 41
+    # 7 active players after 3 starters OUT: raw sum = 178 min -> redistributed near 232, cap <= 41
     raw_low = np.array([34.0, 32.0, 28.0, 26.0, 22.0, 20.0, 16.0])
     adj_low = WhatIfSimulator._apply_team_minutes_budget(raw_low)
-    assert 228.0 <= float(adj_low.sum()) <= 238.0
+    assert 226.0 <= float(adj_low.sum()) <= 236.0
     assert float(adj_low.max()) <= 41.0
     assert (adj_low >= raw_low).all()
 
-    # Over-projected 10-man roster (raw sum = 270 min) -> trimmed near 234
+    # Healthy 10-man roster (raw sum = 270 min) -> never artificially trims healthy starters
     raw_high = np.array([36.0, 34.0, 32.0, 30.0, 28.0, 26.0, 24.0, 22.0, 20.0, 18.0])
     adj_high = WhatIfSimulator._apply_team_minutes_budget(raw_high)
-    assert 230.0 <= float(adj_high.sum()) <= 238.0
-    assert float(adj_high.max()) <= 41.0
+    assert np.allclose(adj_high, raw_high)

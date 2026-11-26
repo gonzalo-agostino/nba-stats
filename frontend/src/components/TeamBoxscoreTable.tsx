@@ -10,7 +10,7 @@ import { PlayerAvatar } from "@/components/PlayerAvatar";
 import { cn, formatSigned, humanizeFeature } from "@/lib/utils";
 
 export type StatViewMode = "main" | "extras" | "all";
-type EdgeStatKey = "pts" | "reb" | "ast" | "pra" | "stl" | "blk" | "tov";
+type EdgeStatKey = "pts" | "reb" | "ast" | "pra" | "ra" | "stl" | "blk" | "tov";
 
 interface TeamBoxscoreTableProps {
   teamFullName: string;
@@ -31,14 +31,15 @@ interface TeamBoxscoreTableProps {
 
 const EXTRAS_COLS: { key: keyof StatProjection; label: string; bold?: boolean }[] = [
   { key: "min", label: "MIN" },
+  { key: "ra", label: "R+A", bold: true },
+  { key: "pr", label: "P+R" },
+  { key: "pa", label: "P+A" },
   { key: "stl", label: "STL" },
   { key: "blk", label: "BLK" },
   { key: "tov", label: "TOV" },
   { key: "pf", label: "PF" },
   { key: "fga", label: "FGA" },
   { key: "ftm", label: "FTM" },
-  { key: "pr", label: "PR" },
-  { key: "pa", label: "PA" },
 ];
 
 const ALL_COLS: { key: keyof StatProjection; label: string; bold?: boolean }[] = [
@@ -47,8 +48,9 @@ const ALL_COLS: { key: keyof StatProjection; label: string; bold?: boolean }[] =
   { key: "reb", label: "REB" },
   { key: "ast", label: "AST" },
   { key: "pra", label: "PRA", bold: true },
-  { key: "pr", label: "PR" },
-  { key: "pa", label: "PA" },
+  { key: "pr", label: "P+R" },
+  { key: "pa", label: "P+A" },
+  { key: "ra", label: "R+A" },
   { key: "stl", label: "STL" },
   { key: "blk", label: "BLK" },
   { key: "tov", label: "TOV" },
@@ -59,16 +61,22 @@ const ALL_COLS: { key: keyof StatProjection; label: string; bold?: boolean }[] =
 
 function ProjCell({
   value,
+  baseValue,
   delta,
   bold,
 }: {
   value: number;
+  baseValue?: number;
   delta: number;
   bold?: boolean;
 }) {
   const showDelta = Math.abs(delta) >= 0.2;
+  const tooltip =
+    baseValue !== undefined
+      ? `Base (sin bajas/B2B): ${baseValue.toFixed(1)} → Proyectado: ${value.toFixed(1)} (${formatSigned(delta, 1)})`
+      : undefined;
   return (
-    <td className="num px-1.5 py-0 text-right align-middle">
+    <td title={tooltip} className="num px-2 py-0 text-right align-middle whitespace-nowrap">
       <span
         className={cn(
           "text-xs text-amber-600 dark:text-amber-400",
@@ -80,7 +88,7 @@ function ProjCell({
       {showDelta ? (
         <span
           className={cn(
-            "ml-0.5 text-[9px] font-medium",
+            "ml-1 text-[10px] font-semibold",
             delta > 0
               ? "text-emerald-600 dark:text-emerald-400"
               : "text-rose-600 dark:text-rose-400"
@@ -137,8 +145,15 @@ export function TeamBoxscoreTable({
       })
     : data.rows;
 
-  const hasOuts = data.rows.some((r) => r.is_out);
-  const totalCols = statView === "main" ? 10 : statView === "extras" ? 11 : 15;
+  const outPlayers = data.rows.filter((r) => r.is_out);
+  const hasOuts = outPlayers.length > 0;
+  const topBeneficiaries = hasOuts
+    ? [...data.rows]
+        .filter((r) => !r.is_out && r.deltas && (r.deltas.min >= 0.3 || r.deltas.pra >= 0.5))
+        .sort((a, b) => (b.deltas?.min ?? 0) - (a.deltas?.min ?? 0))
+        .slice(0, 3)
+    : [];
+  const totalCols = statView === "main" ? 7 : statView === "extras" ? 12 : 16;
 
   return (
     <div className="min-w-0">
@@ -165,53 +180,59 @@ export function TeamBoxscoreTable({
         </button>
       </div>
 
+      {/* Plain-Spanish Rotation Impact Callout when 1+ players are OUT */}
+      {hasOuts && topBeneficiaries.length > 0 ? (
+        <div className="mb-2 rounded-md border border-emerald-500/25 bg-emerald-500/8 px-3 py-1.5 text-[11px] leading-snug text-[var(--text-secondary)]">
+          <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+            Rotación sin {outPlayers.map((p) => p.player_name).join(", ")}:
+          </span>{" "}
+          absorben más carga{" "}
+          {topBeneficiaries.map((p, idx) => (
+            <span key={p.player_id}>
+              {idx > 0 ? ", " : ""}
+              <span className="font-medium text-[var(--text-primary)]">{p.player_name}</span>{" "}
+              <span className="num text-emerald-600 dark:text-emerald-400">
+                ({formatSigned(p.deltas!.min, 1)}m / {formatSigned(p.deltas!.pra, 1)} PRA)
+              </span>
+            </span>
+          ))}
+          .
+        </div>
+      ) : null}
+
       {/* Boxscore table */}
       <div className="overflow-x-auto">
         <table className="w-full border-collapse">
           <thead>
             {statView === "main" ? (
-              <>
-                <tr className="text-[10px] font-medium">
-                  <th colSpan={2} className="pb-1 text-left text-[var(--text-muted)]" />
+              <tr className="border-b border-[var(--border-hairline)] text-[10px] font-medium text-[var(--text-muted)]">
+                <th className="w-7 px-1 py-1.5 text-center">OUT</th>
+                <th className="px-1.5 py-1.5 text-left">
+                  Jugador
+                  {hasOuts ? (
+                    <span className="ml-1.5 font-normal text-amber-500">· con bajas</span>
+                  ) : null}
+                </th>
+                {(
+                  [
+                    { key: "min", label: "MIN" },
+                    { key: "pts", label: "PTS" },
+                    { key: "reb", label: "REB" },
+                    { key: "ast", label: "AST" },
+                    { key: "pra", label: "PRA" },
+                  ] as const
+                ).map((col) => (
                   <th
-                    colSpan={3}
-                    className="border-r border-[var(--border-hairline)] pb-1 text-center text-[var(--text-muted)]"
+                    key={col.key}
+                    onClick={() => handleSort(col.key)}
+                    title={`Ordenar por ${col.label}`}
+                    className="px-2 py-1.5 text-right text-amber-600/90 dark:text-amber-400/90 hover:text-amber-500 cursor-pointer select-none whitespace-nowrap"
                   >
-                    Base
+                    {col.label}
+                    {sortBy === col.key ? (sortDir === "desc" ? "↓" : "↑") : ""}
                   </th>
-                  <th colSpan={5} className="pb-1 text-center text-amber-600 dark:text-amber-400">
-                    Proyectado{hasOuts ? " · con bajas" : ""}
-                  </th>
-                </tr>
-                <tr className="border-b border-[var(--border-hairline)] text-[10px] font-medium text-[var(--text-muted)]">
-                  <th className="w-7 px-1 py-1.5 text-center">OUT</th>
-                  <th className="px-1.5 py-1.5 text-left">Jugador</th>
-                  <th className="px-1.5 py-1.5 text-right">MIN</th>
-                  <th className="px-1.5 py-1.5 text-right">PTS</th>
-                  <th className="border-r border-[var(--border-hairline)] px-1.5 py-1.5 text-right">
-                    PRA
-                  </th>
-                  {(
-                    [
-                      { key: "min", label: "MIN" },
-                      { key: "pts", label: "PTS" },
-                      { key: "reb", label: "REB" },
-                      { key: "ast", label: "AST" },
-                      { key: "pra", label: "PRA" },
-                    ] as const
-                  ).map((col) => (
-                    <th
-                      key={col.key}
-                      onClick={() => handleSort(col.key)}
-                      title={`Ordenar por ${col.label}`}
-                      className="px-1.5 py-1.5 text-right text-amber-600/80 dark:text-amber-400/80 hover:text-amber-500 cursor-pointer select-none"
-                    >
-                      {col.label}
-                      {sortBy === col.key ? (sortDir === "desc" ? "↓" : "↑") : ""}
-                    </th>
-                  ))}
-                </tr>
-              </>
+                ))}
+              </tr>
             ) : (
               <tr className="border-b border-[var(--border-hairline)] text-[10px] font-medium text-[var(--text-muted)]">
                 <th className="w-7 px-1 py-1.5 text-center">OUT</th>
@@ -312,16 +333,16 @@ export function TeamBoxscoreTable({
                         {row.injury_status === "OUT" ? (
                           <span
                             title={row.injury_note ?? "Fuera"}
-                            className="rounded bg-rose-500/15 px-1 py-px text-[9px] font-semibold text-rose-500 dark:text-rose-400"
+                            className="shrink-0 whitespace-nowrap rounded bg-rose-500/15 px-1 py-px text-[9px] font-semibold text-rose-500 dark:text-rose-400"
                           >
-                            Fuera
+                            OUT
                           </span>
                         ) : row.injury_status === "DTD" ? (
                           <span
-                            title={row.injury_note ?? "Día a día"}
-                            className="rounded bg-amber-500/15 px-1 py-px text-[9px] font-semibold text-amber-600 dark:text-amber-400"
+                            title={`Día a día${row.injury_note ? ` — ${row.injury_note}` : ""}`}
+                            className="shrink-0 whitespace-nowrap rounded bg-amber-500/15 px-1 py-px text-[9px] font-semibold text-amber-600 dark:text-amber-400"
                           >
-                            Día a día
+                            DTD
                           </span>
                         ) : null}
                       </div>
@@ -329,55 +350,53 @@ export function TeamBoxscoreTable({
 
                     {/* Stat Columns */}
                     {row.is_out || !row.base || !row.scenario || !row.deltas ? (
-                      statView === "main" ? (
-                        <>
-                          <td className="num px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-muted)]">
-                            {row.ewma_min.toFixed(1)}
-                          </td>
-                          <td className="num px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-muted)]">
-                            —
-                          </td>
-                          <td className="num border-r border-[var(--border-hairline)] px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-muted)]">
-                            —
-                          </td>
-                          <td
-                            colSpan={5}
-                            className="px-2 py-0 text-left align-middle text-xs font-medium text-rose-500 dark:text-rose-400"
-                          >
-                            Baja
-                          </td>
-                        </>
-                      ) : (
-                        <td
-                          colSpan={statView === "extras" ? EXTRAS_COLS.length : ALL_COLS.length}
-                          className="px-2 py-0 text-left align-middle text-xs font-medium text-rose-500 dark:text-rose-400"
-                        >
-                          Baja
-                        </td>
-                      )
+                      <td
+                        colSpan={
+                          statView === "main"
+                            ? 5
+                            : statView === "extras"
+                            ? EXTRAS_COLS.length
+                            : ALL_COLS.length
+                        }
+                        className="px-2 py-0 text-left align-middle text-xs font-medium text-rose-500 dark:text-rose-400"
+                      >
+                        Baja · promedio habitual {row.ewma_min.toFixed(1)} min
+                      </td>
                     ) : statView === "main" ? (
                       <>
-                        <td className="num px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-secondary)]">
-                          {row.base.min.toFixed(1)}
-                        </td>
-                        <td className="num px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-secondary)]">
-                          {row.base.pts.toFixed(1)}
-                        </td>
-                        <td className="num border-r border-[var(--border-hairline)] px-1.5 py-0 text-right align-middle text-[11px] text-[var(--text-secondary)]">
-                          {row.base.pra.toFixed(1)}
-                        </td>
-
-                        <ProjCell value={row.scenario.min} delta={row.deltas.min} />
-                        <ProjCell value={row.scenario.pts} delta={row.deltas.pts} />
-                        <ProjCell value={row.scenario.reb} delta={row.deltas.reb} />
-                        <ProjCell value={row.scenario.ast} delta={row.deltas.ast} />
-                        <ProjCell value={row.scenario.pra} delta={row.deltas.pra} bold />
+                        <ProjCell
+                          value={row.scenario.min}
+                          baseValue={row.base.min}
+                          delta={row.deltas.min}
+                        />
+                        <ProjCell
+                          value={row.scenario.pts}
+                          baseValue={row.base.pts}
+                          delta={row.deltas.pts}
+                        />
+                        <ProjCell
+                          value={row.scenario.reb}
+                          baseValue={row.base.reb}
+                          delta={row.deltas.reb}
+                        />
+                        <ProjCell
+                          value={row.scenario.ast}
+                          baseValue={row.base.ast}
+                          delta={row.deltas.ast}
+                        />
+                        <ProjCell
+                          value={row.scenario.pra}
+                          baseValue={row.base.pra}
+                          delta={row.deltas.pra}
+                          bold
+                        />
                       </>
                     ) : (
                       (statView === "extras" ? EXTRAS_COLS : ALL_COLS).map((col) => (
                         <ProjCell
                           key={col.key}
                           value={row.scenario![col.key]}
+                          baseValue={row.base![col.key]}
                           delta={row.deltas![col.key]}
                           bold={col.bold}
                         />
@@ -461,6 +480,7 @@ export function TeamBoxscoreTable({
                               <option value="reb">REB</option>
                               <option value="ast">AST</option>
                               <option value="pra">PRA</option>
+                              <option value="ra">R+A</option>
                               <option value="stl">STL</option>
                               <option value="blk">BLK</option>
                               <option value="tov">TOV</option>

@@ -135,7 +135,7 @@ def format_projection_table(result: SimulationResult) -> str:
         "| Stat | Base | Escenario | Delta |",
         "| :--- | :---: | :---: | :---: |",
     ]
-    for stat in ["min", "pts", "reb", "ast", "pra", "pr", "pa", "stl", "blk", "tov", "pf", "fga", "ftm"]:
+    for stat in ["min", "pts", "reb", "ast", "pra", "pr", "pa", "ra", "stl", "blk", "tov", "pf", "fga", "ftm"]:
         b = getattr(result.base_projection, stat)
         s = getattr(result.scenario_projection, stat)
         d = getattr(result.deltas, stat)

@@ -121,6 +121,10 @@ class Settings(BaseSettings):
     langsmith_api_key: str | None = None
     langsmith_project: str = "nba-stats"
 
+    # The Odds API (automated NBA player prop lines & Win Rate tracking)
+    the_odds_api_key: str | None = None
+    auto_sync_enabled: bool = True
+
     @property
     def data_dir(self) -> Path:
         if self.nba_stats_data_dir.is_absolute():

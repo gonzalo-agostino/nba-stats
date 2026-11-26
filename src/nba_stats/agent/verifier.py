@@ -8,8 +8,8 @@ from nba_stats.simulator.schemas import SimulationResult
 
 # Matches stat-anchored numbers like "28.4 PTS", "PTS: 28.4", "+3.2 MIN", "45.1 PRA"
 STAT_PATTERN = re.compile(
-    r"(?:(?P<sign1>[+-])?\s*(?P<num1>\d+(?:\.\d+)?)\s*(?P<stat1>pts|puntos|reb|rebotes|ast|asistencias|pra|pr|pa|min|minutos|stl|robos|blk|bloqueos|tapones|tov|pérdidas|perdidas|pf|faltas|fga|tiros|ftm|libres)\b)"
-    r"|(?:(?P<stat2>pts|puntos|reb|rebotes|ast|asistencias|pra|pr|pa|min|minutos|stl|robos|blk|bloqueos|tapones|tov|pérdidas|perdidas|pf|faltas|fga|tiros|ftm|libres)\s*[:=de]+\s*(?P<sign2>[+-])?\s*(?P<num2>\d+(?:\.\d+)?))",
+    r"(?:(?P<sign1>[+-])?\s*(?P<num1>\d+(?:\.\d+)?)\s*(?P<stat1>pts|puntos|reb|rebotes|ast|asistencias|pra|pr|pa|ra|min|minutos|stl|robos|blk|bloqueos|tapones|tov|pérdidas|perdidas|pf|faltas|fga|tiros|ftm|libres)\b)"
+    r"|(?:(?P<stat2>pts|puntos|reb|rebotes|ast|asistencias|pra|pr|pa|ra|min|minutos|stl|robos|blk|bloqueos|tapones|tov|pérdidas|perdidas|pf|faltas|fga|tiros|ftm|libres)\s*[:=de]+\s*(?P<sign2>[+-])?\s*(?P<num2>\d+(?:\.\d+)?))",
     flags=re.IGNORECASE,
 )
 
@@ -23,6 +23,7 @@ STAT_NORMALIZE: dict[str, str] = {
     "pra": "pra",
     "pr": "pr",
     "pa": "pa",
+    "ra": "ra",
     "min": "min",
     "minutos": "min",
     "stl": "stl",

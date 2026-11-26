@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import duckdb
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+logger = logging.getLogger(__name__)
+
 from nba_stats.agent.graph import build_prediction_graph, run_agent_query
 from nba_stats.agent.nodes import AgentNodes
 from nba_stats.api.injuries import InjuryService, normalize_name
+from nba_stats.api.odds import DEFAULT_MARKETS, OddsService
 from nba_stats.api.schemas import (
     AskRequest,
     AskResponse,
@@ -42,28 +50,11 @@ def create_app(
     agent_nodes: AgentNodes | None = None,
     slate_service: SlateService | None = None,
     injury_service: InjuryService | None = None,
+    odds_service: OddsService | None = None,
+    enable_scheduler: bool = False,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
     cfg = settings or Settings()
-
-    app = FastAPI(
-        title="NBA Stats Analytics API",
-        version="0.4.0",
-        description="Real-time What-If NBA player stats simulator (LightGBM + SHAP + WOWY) and LangGraph agent.",
-    )
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://localhost:4173",
-            "http://127.0.0.1:4173",
-        ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
 
     state: dict[str, Any] = {
         "simulator": simulator,
@@ -71,6 +62,8 @@ def create_app(
         "agent_nodes": agent_nodes,
         "slate_service": slate_service or SlateService(duckdb_path=cfg.duckdb_path),
         "injury_service": injury_service or InjuryService(),
+        "odds_service": odds_service
+        or OddsService(duckdb_path=cfg.duckdb_path, api_key=cfg.the_odds_api_key),
     }
 
     def _get_simulator() -> WhatIfSimulator:
@@ -106,6 +99,97 @@ def create_app(
             return None
         return None
 
+    async def _auto_scheduler_loop() -> None:
+        """Zero-dependency background loop for daily sync/grading and pre-game prop snapshots."""
+        last_sync_day: date | None = None
+        last_snapshot_day: date | None = None
+
+        while True:
+            try:
+                now_local = datetime.now()
+                today = now_local.date()
+
+                # 1. Morning auto-sync & auto-grade (after 09:00 local, once per day)
+                if now_local.hour >= 9 and last_sync_day != today:
+                    latest = _get_latest_game_date()
+                    yesterday_iso = (today - timedelta(days=1)).isoformat()
+                    if latest is None or latest < yesterday_iso:
+                        logger.info("Auto-scheduler: running daily incremental sync & pick grading...")
+                        ing_cfg = load_ingestion_config(cfg)
+                        await asyncio.to_thread(
+                            run_ingestion,
+                            seasons=[ing_cfg.active_season],
+                            force=False,
+                            settings=cfg,
+                            config=ing_cfg,
+                        )
+                        if state["simulator"] is not None:
+                            state["simulator"].clear_caches()
+                        state["slate_service"]._cache.clear()
+                    grade_res = await asyncio.to_thread(state["odds_service"].grade_pending_picks)
+                    if grade_res.get("graded", 0) > 0:
+                        logger.info("Auto-scheduler: graded %d pending picks.", grade_res["graded"])
+                    last_sync_day = today
+
+                # 2. Pre-game auto-snapshot (between 18:00 and 22:00 local, once per day, 0 duplicate credits)
+                if 18 <= now_local.hour <= 22 and last_snapshot_day != today and cfg.the_odds_api_key:
+                    slate = await asyncio.to_thread(
+                        state["slate_service"].get_today_slate,
+                        today.isoformat(),
+                    )
+                    if slate.get("games"):
+                        logger.info("Auto-scheduler: capturing daily prop lines & tracking picks for %s...", today)
+                        snap = await asyncio.to_thread(
+                            state["odds_service"].snapshot_and_track_picks,
+                            _get_simulator(),
+                            state["slate_service"],
+                            state["injury_service"],
+                            today.isoformat(),
+                            DEFAULT_MARKETS,
+                            False,
+                        )
+                        logger.info(
+                            "Auto-scheduler: %d picks registered (from_cache=%s).",
+                            snap.get("picks_registered", 0),
+                            snap.get("lines_from_cache", False),
+                        )
+                    last_snapshot_day = today
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Auto-scheduler tick error: %s", exc)
+
+            await asyncio.sleep(30 * 60)
+
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        task: asyncio.Task[None] | None = None
+        if enable_scheduler and cfg.auto_sync_enabled:
+            task = asyncio.create_task(_auto_scheduler_loop())
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+
+    app = FastAPI(
+        title="NBA Stats Analytics API",
+        version="0.4.0",
+        description="Real-time What-If NBA player stats simulator (LightGBM + SHAP + WOWY) and LangGraph agent.",
+        lifespan=_lifespan,
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:4173",
+            "http://127.0.0.1:4173",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     @app.get("/api/v1/health")
     def health() -> dict[str, str | None]:
         return {"status": "ok", "latest_game_date": _get_latest_game_date()}
@@ -128,6 +212,7 @@ def create_app(
             state["simulator"].clear_caches()
         state["slate_service"]._cache.clear()
         state["injury_service"].get_injuries(force_refresh=True)
+        grade_summary = state["odds_service"].grade_pending_picks()
 
         summary = report.seasons[0] if report.seasons else None
         return {
@@ -136,7 +221,60 @@ def create_app(
             "games_ingested": summary.games_rows if summary else 0,
             "player_logs_ingested": summary.player_logs_rows if summary else 0,
             "latest_game_date": _get_latest_game_date(),
+            "graded_picks": grade_summary,
         }
+
+    @app.get("/api/v1/props/lines")
+    def get_prop_lines(
+        game_date: str | None = Query(default=None, description="Fecha YYYY-MM-DD."),
+    ) -> dict[str, Any]:
+        from datetime import date as _date
+
+        svc: OddsService = state["odds_service"]
+        ref_date = _date.fromisoformat(game_date[:10]) if game_date else _date.today()
+        lines = svc.get_lines_for_date(ref_date)
+        return {
+            "game_date": ref_date.isoformat(),
+            "lines": lines,
+            "requests_remaining": svc.requests_remaining,
+        }
+
+    @app.post("/api/v1/props/snapshot")
+    def snapshot_daily_props(
+        game_date: str | None = Query(default=None, description="Fecha YYYY-MM-DD opcional."),
+        force_refresh: bool = Query(default=False),
+        min_edge: float | None = Query(default=None, ge=0.5, le=10.0),
+    ) -> dict[str, Any]:
+        """Auto-fetch market prop lines, run ML projections, and register high-edge picks."""
+        svc: OddsService = state["odds_service"]
+        try:
+            return svc.snapshot_and_track_picks(
+                simulator=_get_simulator(),
+                slate_service=state["slate_service"],
+                injury_service=state["injury_service"],
+                game_date_str=game_date,
+                markets=DEFAULT_MARKETS,
+                force_refresh=force_refresh,
+                min_edge_override=min_edge,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Error capturando líneas: {exc}") from exc
+
+    @app.post("/api/v1/props/grade")
+    def grade_picks() -> dict[str, Any]:
+        """Grade all PENDING tracked picks against actual NBA game logs in DuckDB."""
+        svc: OddsService = state["odds_service"]
+        return svc.grade_pending_picks()
+
+    @app.get("/api/v1/props/performance")
+    def get_props_performance(
+        limit: int = Query(default=150, ge=10, le=500),
+    ) -> dict[str, Any]:
+        """Return live Win Rate, ROI, net units, breakdowns, and tracked pick history."""
+        svc: OddsService = state["odds_service"]
+        return svc.get_performance_summary(limit=limit)
 
     @app.get("/api/v1/slate/today", response_model=TodaySlateResponse)
     def get_today_slate(
@@ -234,7 +372,12 @@ def create_app(
         with _connect_db() as con:
             rows = con.execute(
                 """
-                WITH latest_player_team AS (
+                WITH team_latest_season AS (
+                    SELECT MAX(season) AS max_season
+                    FROM team_game_logs
+                    WHERE team_id = ?
+                ),
+                latest_player_team AS (
                     SELECT
                         player_id,
                         player_name,
@@ -247,9 +390,12 @@ def create_app(
                     FROM player_game_logs
                 ),
                 active_on_team AS (
-                    SELECT player_id, player_name, season
-                    FROM latest_player_team
-                    WHERE rn = 1 AND team_id = ?
+                    SELECT l.player_id, l.player_name, l.season
+                    FROM latest_player_team l
+                    CROSS JOIN team_latest_season tls
+                    WHERE l.rn = 1
+                      AND l.team_id = ?
+                      AND (tls.max_season IS NULL OR l.season = tls.max_season)
                 ),
                 recent_logs AS (
                     SELECT
@@ -289,7 +435,7 @@ def create_app(
                 ORDER BY w.ewma_min DESC
                 LIMIT ?
                 """,
-                [team_id, team_id, limit],
+                [team_id, team_id, team_id, limit],
             ).fetchall()
 
         return [
@@ -615,4 +761,4 @@ def create_app(
     return app
 
 
-app = create_app()
+app = create_app(enable_scheduler=True)
