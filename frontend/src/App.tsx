@@ -386,9 +386,40 @@ export function App() {
         {/* 1. Top Unified Bar: Brand + Player Search / LangGraph AI + Theme */}
         <div ref={topSearchRef} className="relative mb-3">
           <div className="flex items-center gap-2">
-            <span className="hidden text-sm font-bold tracking-tight text-[var(--text-primary)] sm:inline">
-              NBA<span className="text-amber-500">Stats</span>
-            </span>
+            <button
+              type="button"
+              onClick={() => setActiveTab("props")}
+              className="inline-flex shrink-0 items-center gap-2 cursor-pointer group"
+              title="NBA Stats"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 32 32"
+                fill="none"
+                className="h-7 w-7 shrink-0 transition-transform duration-200 group-hover:rotate-12"
+                aria-hidden="true"
+              >
+                <defs>
+                  <linearGradient id="nbaLogoBall" x1="4" y1="3" x2="28" y2="29" gradientUnits="userSpaceOnUse">
+                    <stop offset="0%" stopColor="#F59E0B" />
+                    <stop offset="100%" stopColor="#EA580C" />
+                  </linearGradient>
+                  <clipPath id="nbaLogoClip">
+                    <circle cx="16" cy="16" r="14" />
+                  </clipPath>
+                </defs>
+                <circle cx="16" cy="16" r="14" fill="url(#nbaLogoBall)" />
+                <g clipPath="url(#nbaLogoClip)" stroke="#0B0E14" strokeWidth="1.8" strokeLinecap="round">
+                  <path d="M2 16 H30" />
+                  <path d="M16 2 V30" />
+                  <path d="M6.2 5.2 C11.5 10.5 11.5 21.5 6.2 26.8" />
+                  <path d="M25.8 5.2 C20.5 10.5 20.5 21.5 25.8 26.8" />
+                </g>
+              </svg>
+              <span className="hidden text-sm font-bold tracking-tight text-[var(--text-primary)] sm:inline">
+                NBA<span className="text-amber-500">Stats</span>
+              </span>
+            </button>
 
             <div className="inline-flex h-9 shrink-0 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-0.5 text-xs">
               <button

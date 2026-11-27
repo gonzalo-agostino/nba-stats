@@ -10,7 +10,7 @@ from typing import Any
 import duckdb
 import requests
 
-from nba_stats.api.injuries import InjuryService, normalize_name
+from nba_stats.api.injuries import ESPN_TO_NBA_ABBR, InjuryService, normalize_name
 from nba_stats.api.slate import SlateService
 from nba_stats.data.schema import init_schema
 from nba_stats.simulator.what_if import WhatIfSimulator
@@ -18,6 +18,7 @@ from nba_stats.simulator.what_if import WhatIfSimulator
 logger = logging.getLogger(__name__)
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/basketball_nba"
+ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 
 MARKET_TO_STAT: dict[str, str] = {
     "player_points": "pts",
@@ -32,7 +33,13 @@ MARKET_TO_STAT: dict[str, str] = {
     "player_turnovers": "tov",
 }
 
-DEFAULT_MARKETS: tuple[str, ...] = (
+# Credit-saver default: only 2 markets (~16 credits/day -> lasts all month on 500 free credits)
+SAVER_MARKETS: tuple[str, ...] = (
+    "player_points",
+    "player_points_rebounds_assists",
+)
+
+FULL_MARKETS: tuple[str, ...] = (
     "player_points",
     "player_rebounds",
     "player_assists",
@@ -44,6 +51,8 @@ DEFAULT_MARKETS: tuple[str, ...] = (
     "player_blocks",
     "player_turnovers",
 )
+
+DEFAULT_MARKETS: tuple[str, ...] = SAVER_MARKETS
 
 PREFERRED_BOOKMAKERS: tuple[str, ...] = (
     "fanduel",
@@ -136,31 +145,74 @@ class OddsService:
         resp.raise_for_status()
         return resp.json()
 
-    def _fetch_game_odds_raw(self) -> list[dict[str, Any]]:
-        """Fetch NBA game spreads & totals for all upcoming games (2 credits total for entire slate)."""
-        if not self.api_key:
-            raise ValueError("Falta configurar THE_ODDS_API_KEY en el archivo .env.")
+    def _fetch_espn_game_odds(self, target_date: date) -> list[tuple[Any, ...]]:
+        """Fetch 100% FREE NBA game spreads & totals from ESPN public scoreboard JSON (0 credits)."""
         resp = requests.get(
-            f"{ODDS_API_BASE}/odds",
-            params={
-                "apiKey": self.api_key,
-                "regions": "us",
-                "markets": "spreads,totals",
-                "oddsFormat": "decimal",
-            },
-            timeout=15,
+            ESPN_SCOREBOARD_URL,
+            params={"dates": target_date.strftime("%Y%m%d")},
+            timeout=10,
         )
-        self._update_quota_headers(resp)
         resp.raise_for_status()
-        data = resp.json()
-        return data if isinstance(data, list) else []
+        payload = resp.json()
+        now_ts = datetime.now(UTC).replace(tzinfo=None)
+        rows: list[tuple[Any, ...]] = []
+
+        for ev in payload.get("events") or []:
+            comps = ev.get("competitions") or []
+            if not comps:
+                continue
+            comp = comps[0]
+            competitors = comp.get("competitors") or []
+            home_abbr = ""
+            away_abbr = ""
+            for c in competitors:
+                raw_abbr = str((c.get("team") or {}).get("abbreviation") or "").upper()
+                nba_abbr = ESPN_TO_NBA_ABBR.get(raw_abbr, raw_abbr)
+                if c.get("homeAway") == "home":
+                    home_abbr = nba_abbr
+                elif c.get("homeAway") == "away":
+                    away_abbr = nba_abbr
+            if not home_abbr or not away_abbr:
+                continue
+
+            odds_list = comp.get("odds") or []
+            if not odds_list:
+                continue
+            od = odds_list[0]
+            provider = str((od.get("provider") or {}).get("name") or "ESPN").strip()
+            total_val = od.get("overUnder")
+            total_points = float(total_val) if total_val is not None else None
+
+            spread_home: float | None = None
+            spread_away: float | None = None
+            raw_spread = od.get("spread")
+            if raw_spread is not None:
+                # ESPN `spread` is from the home team's perspective (negative = home favorite)
+                spread_home = float(raw_spread)
+                spread_away = round(-spread_home, 1)
+
+            if spread_home is not None or total_points is not None:
+                rows.append(
+                    (
+                        target_date,
+                        f"{away_abbr}@{home_abbr}",
+                        home_abbr,
+                        away_abbr,
+                        provider,
+                        spread_home,
+                        spread_away,
+                        total_points,
+                        now_ts,
+                    )
+                )
+        return rows
 
     def fetch_and_cache_game_odds(
         self,
         target_date: date,
         force_refresh: bool = False,
     ) -> int:
-        """Fetch and cache Vegas spreads & totals for target_date in DuckDB game_odds."""
+        """Fetch and cache FREE Vegas spreads & totals from ESPN in DuckDB game_odds (0 credits)."""
         with self._connect_rw() as con:
             existing = int(
                 con.execute(
@@ -172,64 +224,10 @@ class OddsService:
                 return existing
 
         try:
-            events = self._fetch_game_odds_raw()
+            rows = self._fetch_espn_game_odds(target_date)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed fetching NBA game spreads/totals: %s", exc)
+            logger.warning("Failed fetching free ESPN game spreads/totals: %s", exc)
             return 0
-
-        now_ts = datetime.now(UTC).replace(tzinfo=None)
-        rows: list[tuple[Any, ...]] = []
-        for ev in events:
-            ev_date = self._event_local_date(str(ev.get("commence_time") or ""))
-            if ev_date != target_date:
-                continue
-            event_id = str(ev.get("id") or "")
-            home_team = str(ev.get("home_team") or "")
-            away_team = str(ev.get("away_team") or "")
-            bookmakers = ev.get("bookmakers") or []
-            bookmakers_sorted = sorted(
-                bookmakers,
-                key=lambda b: (
-                    PREFERRED_BOOKMAKERS.index(str(b.get("key") or "").lower())
-                    if str(b.get("key") or "").lower() in PREFERRED_BOOKMAKERS
-                    else 99
-                ),
-            )
-            spread_home: float | None = None
-            spread_away: float | None = None
-            total_points: float | None = None
-            chosen_bm = "consensus"
-            for bm in bookmakers_sorted:
-                chosen_bm = str(bm.get("key") or "consensus").lower()
-                for m in bm.get("markets") or []:
-                    mkey = str(m.get("key") or "")
-                    if mkey == "spreads" and spread_home is None:
-                        for o in m.get("outcomes") or []:
-                            if o.get("name") == home_team and o.get("point") is not None:
-                                spread_home = float(o["point"])
-                            elif o.get("name") == away_team and o.get("point") is not None:
-                                spread_away = float(o["point"])
-                    elif mkey == "totals" and total_points is None:
-                        for o in m.get("outcomes") or []:
-                            if o.get("point") is not None:
-                                total_points = float(o["point"])
-                                break
-                if spread_home is not None and total_points is not None:
-                    break
-            if event_id and (spread_home is not None or total_points is not None):
-                rows.append(
-                    (
-                        target_date,
-                        event_id,
-                        home_team,
-                        away_team,
-                        chosen_bm,
-                        spread_home,
-                        spread_away,
-                        total_points,
-                        now_ts,
-                    )
-                )
 
         if rows:
             with self._connect_rw() as con:
@@ -245,7 +243,7 @@ class OddsService:
         return len(rows)
 
     def get_game_odds_for_date(self, target_date: date) -> dict[str, dict[str, Any]]:
-        """Return cached spreads & totals indexed by event_id and normalized team full name."""
+        """Return cached spreads & totals indexed by event_id AND 'AWAY@HOME' abbreviation key."""
         with self._connect_rw() as con:
             rows = con.execute(
                 """
@@ -255,7 +253,7 @@ class OddsService:
                 """,
                 [target_date],
             ).fetchall()
-        by_event: dict[str, dict[str, Any]] = {}
+        by_key: dict[str, dict[str, Any]] = {}
         for r in rows:
             rec = {
                 "event_id": str(r[0]),
@@ -266,8 +264,9 @@ class OddsService:
                 "spread_away": float(r[5]) if r[5] is not None else None,
                 "total_points": float(r[6]) if r[6] is not None else None,
             }
-            by_event[rec["event_id"]] = rec
-        return by_event
+            by_key[rec["event_id"]] = rec
+            by_key[f"{rec['away_team']}@{rec['home_team']}"] = rec
+        return by_key
 
     def _event_local_date(self, commence_time_iso: str) -> date | None:
         """Convert UTC ISO commence_time to US Eastern NBA schedule date (UTC-5)."""
@@ -452,9 +451,8 @@ class OddsService:
             markets=markets,
             force_refresh=force_refresh,
         )
-        # Also cache Vegas spreads & totals (2 credits total for the whole slate, 0 if cached)
-        if self.api_key:
-            self.fetch_and_cache_game_odds(target_date=ref_date, force_refresh=force_refresh)
+        # Always cache FREE Vegas spreads & totals from ESPN (0 Odds API credits!)
+        self.fetch_and_cache_game_odds(target_date=ref_date, force_refresh=force_refresh)
         lines = self.get_lines_for_date(ref_date)
 
         # Index lines by (player_name_norm) -> list[line_dict]
@@ -985,6 +983,11 @@ class OddsService:
         lines = self.get_lines_for_date(ref_date)
         game_odds_by_event = self.get_game_odds_for_date(ref_date)
 
+        # Auto-fetch FREE ESPN spreads & totals if not cached yet (0 credits!)
+        if not game_odds_by_event and games:
+            self.fetch_and_cache_game_odds(target_date=ref_date, force_refresh=False)
+            game_odds_by_event = self.get_game_odds_for_date(ref_date)
+
         # Index lines by player_name_norm
         lines_by_player: dict[str, list[dict[str, Any]]] = {}
         for ln in lines:
@@ -1144,8 +1147,10 @@ class OddsService:
                             rec_side == "UNDER" and ml_edge < -0.3
                         )
 
-                        # Vegas game odds (spread & total)
-                        ev_odds = game_odds_by_event.get(ln["event_id"])
+                        # Vegas game odds (spread & total from free ESPN feed or cached event)
+                        ev_odds = game_odds_by_event.get(
+                            f"{away_abbr}@{home_abbr}"
+                        ) or game_odds_by_event.get(ln["event_id"])
                         team_spread: float | None = None
                         game_total: float | None = None
                         if ev_odds:

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 from nba_stats.agent.graph import build_prediction_graph, run_agent_query
 from nba_stats.agent.nodes import AgentNodes
 from nba_stats.api.injuries import InjuryService, normalize_name
-from nba_stats.api.odds import DEFAULT_MARKETS, OddsService
+from nba_stats.api.odds import DEFAULT_MARKETS, FULL_MARKETS, SAVER_MARKETS, OddsService
 from nba_stats.api.schemas import (
     AskRequest,
     AskResponse,
@@ -243,17 +243,19 @@ def create_app(
     def snapshot_daily_props(
         game_date: str | None = Query(default=None, description="Fecha YYYY-MM-DD opcional."),
         force_refresh: bool = Query(default=False),
+        mode: str = Query(default="saver", description="'saver' (PTS+PRA, 2 cred/partido) o 'full' (10 stats)."),
         min_edge: float | None = Query(default=None, ge=0.5, le=10.0),
     ) -> dict[str, Any]:
         """Auto-fetch market prop lines, run ML projections, and register high-edge picks."""
         svc: OddsService = state["odds_service"]
+        markets = FULL_MARKETS if mode.lower() == "full" else SAVER_MARKETS
         try:
             return svc.snapshot_and_track_picks(
                 simulator=_get_simulator(),
                 slate_service=state["slate_service"],
                 injury_service=state["injury_service"],
                 game_date_str=game_date,
-                markets=DEFAULT_MARKETS,
+                markets=markets,
                 force_refresh=force_refresh,
                 min_edge_override=min_edge,
             )

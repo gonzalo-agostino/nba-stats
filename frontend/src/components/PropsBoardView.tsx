@@ -61,6 +61,7 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
   const [board, setBoard] = useState<PropBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [capturing, setCapturing] = useState(false);
+  const [captureMode, setCaptureMode] = useState<"saver" | "full">("saver");
   const [error, setError] = useState<string | null>(null);
 
   // Filters
@@ -110,10 +111,21 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
 
   async function handleCaptureLines(forceRefresh = false) {
     if (capturing) return;
+    if (forceRefresh) {
+      const estGames = Math.max(1, board?.games.length ?? 6);
+      const perGame = captureMode === "full" ? 10 : 2;
+      const estCredits = estGames * perGame;
+      const ok = window.confirm(
+        `¿Refrescar líneas desde The Odds API en modo ${
+          captureMode === "full" ? "Completo (10 stats)" : "Ahorro (PTS + PRA)"
+        }?\n\nConsumo estimado: ~${estCredits} créditos (Spread/Total de ESPN es gratis).`
+      );
+      if (!ok) return;
+    }
     setCapturing(true);
     setError(null);
     try {
-      await snapshotDailyProps(activeDate || undefined, forceRefresh);
+      await snapshotDailyProps(activeDate || undefined, forceRefresh, captureMode);
       await loadBoard(activeDate);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error capturando líneas de The Odds API.");
@@ -344,11 +356,21 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
         </div>
 
         <div className="flex items-center gap-1.5">
+          <select
+            aria-label="Modo de créditos Odds API"
+            value={captureMode}
+            onChange={(e) => setCaptureMode(e.target.value as "saver" | "full")}
+            title="Ahorro: PTS + PRA (2 créd/partido) · Completo: 10 stats (10 créd/partido)"
+            className="h-7 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-1.5 text-[11px] font-medium text-[var(--text-secondary)]"
+          >
+            <option value="saver">Ahorro (PTS+PRA)</option>
+            <option value="full">Completo (10 stats)</option>
+          </select>
           <button
             type="button"
             disabled={capturing}
             onClick={() => void handleCaptureLines(allItems.length > 0)}
-            title="Traer líneas reales y Spread/Total desde The Odds API"
+            title="Traer líneas desde The Odds API (Spread/Total de ESPN es 100% gratis)"
             className="inline-flex h-7 items-center gap-1.5 rounded bg-[var(--accent)] px-2.5 text-[11px] font-medium text-white hover:opacity-90 disabled:opacity-50 cursor-pointer"
           >
             {capturing ? (

@@ -425,11 +425,13 @@ export function fetchPropsPerformance(limit = 150): Promise<PerformanceSummaryRe
 
 export function snapshotDailyProps(
   gameDate?: string,
-  forceRefresh = false
+  forceRefresh = false,
+  mode: "saver" | "full" = "saver"
 ): Promise<PropsSnapshotResponse> {
   const params = new URLSearchParams();
   if (gameDate) params.set("game_date", gameDate);
   if (forceRefresh) params.set("force_refresh", "true");
+  params.set("mode", mode);
   const qs = params.toString() ? `?${params.toString()}` : "";
   return requestJson<PropsSnapshotResponse>(`/api/v1/props/snapshot${qs}`, {
     method: "POST",
