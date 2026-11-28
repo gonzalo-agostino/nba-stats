@@ -202,6 +202,27 @@ DDL_STATEMENTS: tuple[str, ...] = (
         PRIMARY KEY (game_date, event_id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS tracked_parlays (
+        parlay_id VARCHAR PRIMARY KEY,
+        game_date DATE NOT NULL,
+        label VARCHAR NOT NULL,
+        target_odds DOUBLE,
+        combined_odds DOUBLE NOT NULL,
+        estimated_prob DOUBLE,
+        stake_units DOUBLE NOT NULL DEFAULT 1.0,
+        legs_json VARCHAR NOT NULL,
+        status VARCHAR NOT NULL DEFAULT 'PENDING',
+        legs_won INTEGER NOT NULL DEFAULT 0,
+        legs_lost INTEGER NOT NULL DEFAULT 0,
+        legs_void INTEGER NOT NULL DEFAULT 0,
+        legs_total INTEGER NOT NULL DEFAULT 0,
+        effective_odds DOUBLE,
+        profit_units DOUBLE,
+        created_at TIMESTAMP NOT NULL,
+        graded_at TIMESTAMP
+    )
+    """,
 )
 
 

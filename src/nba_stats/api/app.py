@@ -19,6 +19,7 @@ from nba_stats.agent.graph import build_prediction_graph, run_agent_query
 from nba_stats.agent.nodes import AgentNodes
 from nba_stats.api.injuries import InjuryService, normalize_name
 from nba_stats.api.odds import DEFAULT_MARKETS, FULL_MARKETS, SAVER_MARKETS, OddsService
+from nba_stats.api.parlay import ParlayService, build_parlay_recommendations
 from nba_stats.api.schemas import (
     AskRequest,
     AskResponse,
@@ -26,11 +27,13 @@ from nba_stats.api.schemas import (
     GamePaceSummary,
     GameSimulationRequest,
     GameSimulationResponse,
+    ParlayBuildRequest,
     PlayerGameLogItem,
     PlayerProfileResponse,
     PlayerSearchItem,
     PlayerSplitsSummary,
     RosterPlayerItem,
+    SaveParlayRequest,
     TeamItem,
     TeamSimulationRequest,
     TeamSimulationResponse,
@@ -66,6 +69,7 @@ def create_app(
         "injury_service": injury_service or InjuryService(),
         "odds_service": odds_service
         or OddsService(duckdb_path=cfg.duckdb_path, api_key=cfg.the_odds_api_key),
+        "parlay_service": ParlayService(duckdb_path=cfg.duckdb_path),
     }
 
     def _get_simulator() -> WhatIfSimulator:
@@ -129,6 +133,7 @@ def create_app(
                             state["simulator"].clear_caches()
                         state["slate_service"]._cache.clear()
                     grade_res = await asyncio.to_thread(state["odds_service"].grade_pending_picks)
+                    await asyncio.to_thread(state["parlay_service"].grade_pending_parlays)
                     if grade_res.get("graded", 0) > 0:
                         logger.info("Auto-scheduler: graded %d pending picks.", grade_res["graded"])
                     await asyncio.to_thread(hf_sync.push_db, f"Auto-sync & grade ({today})")
@@ -227,6 +232,7 @@ def create_app(
         state["slate_service"]._cache.clear()
         state["injury_service"].get_injuries(force_refresh=True)
         grade_summary = state["odds_service"].grade_pending_picks()
+        parlay_grade_summary = state["parlay_service"].grade_pending_parlays()
         hf_sync.push_db(commit_message="API sync & grade")
 
         summary = report.seasons[0] if report.seasons else None
@@ -237,6 +243,7 @@ def create_app(
             "player_logs_ingested": summary.player_logs_rows if summary else 0,
             "latest_game_date": _get_latest_game_date(),
             "graded_picks": grade_summary,
+            "graded_parlays": parlay_grade_summary,
         }
 
     @app.get("/api/v1/props/lines")
@@ -283,11 +290,64 @@ def create_app(
 
     @app.post("/api/v1/props/grade")
     def grade_picks() -> dict[str, Any]:
-        """Grade all PENDING tracked picks against actual NBA game logs in DuckDB."""
+        """Grade all PENDING tracked picks and parlays against actual NBA game logs in DuckDB."""
         svc: OddsService = state["odds_service"]
+        parlay_svc: ParlayService = state["parlay_service"]
         res = svc.grade_pending_picks()
+        parlay_res = parlay_svc.grade_pending_parlays()
+        if res.get("graded", 0) > 0 or parlay_res.get("graded", 0) > 0:
+            hf_sync.push_db(commit_message=f"API grade ({res['graded']} picks, {parlay_res['graded']} parlays)")
+        return {**res, "parlays": parlay_res}
+
+    @app.post("/api/v1/props/build-parlay")
+    def build_parlay(request: ParlayBuildRequest) -> dict[str, Any]:
+        """Build optimal parlay (combinada) suggestions matching target_odds and locked picks."""
+        svc: OddsService = state["odds_service"]
+        board = svc.build_prop_board(
+            simulator=_get_simulator(),
+            slate_service=state["slate_service"],
+            injury_service=state["injury_service"],
+            game_date_str=request.game_date,
+        )
+        result = build_parlay_recommendations(board.get("items") or [], request)
+        return {
+            "game_date": board.get("game_date"),
+            **result,
+        }
+
+    @app.get("/api/v1/props/parlays")
+    def list_tracked_parlays(
+        limit: int = Query(default=100, ge=10, le=300),
+    ) -> dict[str, Any]:
+        """Return saved parlays history, Win Rate, ROI, and net units."""
+        parlay_svc: ParlayService = state["parlay_service"]
+        return parlay_svc.get_parlay_history(limit=limit)
+
+    @app.post("/api/v1/props/parlays")
+    def save_tracked_parlay(request: SaveParlayRequest) -> dict[str, Any]:
+        """Save a parlay to DuckDB for automatic Win Rate/ROI tracking."""
+        parlay_svc: ParlayService = state["parlay_service"]
+        saved = parlay_svc.save_parlay(request)
+        hf_sync.push_db(commit_message=f"Save parlay ({saved['parlay_id']})")
+        return saved
+
+    @app.delete("/api/v1/props/parlays/{parlay_id}")
+    def delete_tracked_parlay(parlay_id: str) -> dict[str, Any]:
+        """Delete a saved parlay from DuckDB."""
+        parlay_svc: ParlayService = state["parlay_service"]
+        deleted = parlay_svc.delete_parlay(parlay_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Combinada no encontrada.")
+        hf_sync.push_db(commit_message=f"Delete parlay ({parlay_id})")
+        return {"status": "deleted", "parlay_id": parlay_id}
+
+    @app.post("/api/v1/props/parlays/grade")
+    def grade_parlays() -> dict[str, Any]:
+        """Grade all PENDING saved parlays against actual NBA boxscores."""
+        parlay_svc: ParlayService = state["parlay_service"]
+        res = parlay_svc.grade_pending_parlays()
         if res.get("graded", 0) > 0:
-            hf_sync.push_db(commit_message=f"API grade ({res['graded']} picks)")
+            hf_sync.push_db(commit_message=f"Grade parlays ({res['graded']})")
         return res
 
     @app.get("/api/v1/props/performance")

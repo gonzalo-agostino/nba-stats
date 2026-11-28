@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
   ChevronLeft,
+  Layers,
   Loader2,
   Minus,
   Plus,
@@ -21,6 +23,7 @@ import {
   type PropBoardResponse,
 } from "@/lib/api";
 import { AiAnalysisBlock } from "@/components/AiAnalysisBlock";
+import { ParlayBuilderModal } from "@/components/ParlayBuilderModal";
 import { PlayerAvatar } from "@/components/PlayerAvatar";
 import { PropBarChart } from "@/components/PropBarChart";
 import { cn, formatSigned } from "@/lib/utils";
@@ -60,6 +63,14 @@ interface PropsBoardViewProps {
 
 export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewProps) {
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
+  const [lockedPickIds, setLockedPickIds] = useState<string[]>([]);
+  const [parlayOpen, setParlayOpen] = useState(false);
+
+  function toggleLockPick(pickId: string) {
+    setLockedPickIds((prev) =>
+      prev.includes(pickId) ? prev.filter((id) => id !== pickId) : [...prev, pickId]
+    );
+  }
   const [board, setBoard] = useState<PropBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [capturing, setCapturing] = useState(false);
@@ -400,6 +411,18 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
           </select>
           <button
             type="button"
+            disabled={allItems.length === 0}
+            onClick={() => setParlayOpen(true)}
+            title="Armar combinada recomendada por cuota objetivo y picks elegidos"
+            className="inline-flex h-7 items-center gap-1.5 rounded bg-amber-500 px-2.5 text-[11px] font-bold text-slate-950 hover:opacity-90 disabled:opacity-40 cursor-pointer"
+          >
+            <Layers className="h-3.5 w-3.5" />
+            <span>
+              Combinada{lockedPickIds.length > 0 ? ` (${lockedPickIds.length})` : ""}
+            </span>
+          </button>
+          <button
+            type="button"
             disabled={capturing}
             onClick={() => void handleCaptureLines(allItems.length > 0)}
             title="Traer líneas desde The Odds API (Spread/Total de ESPN es 100% gratis)"
@@ -548,6 +571,37 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
                       <span className="num text-[10px] text-[var(--text-muted)]">
                         Cuota {item.odds_decimal.toFixed(2)} · Proy {item.ml_projection.toFixed(1)}
                       </span>
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleLockPick(item.id);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            toggleLockPick(item.id);
+                          }
+                        }}
+                        className={cn(
+                          "mt-0.5 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold transition-colors",
+                          lockedPickIds.includes(item.id)
+                            ? "bg-amber-500 text-slate-950"
+                            : "border border-[var(--border-hairline)] bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:border-amber-500"
+                        )}
+                      >
+                        {lockedPickIds.includes(item.id) ? (
+                          <>
+                            <Check className="h-2.5 w-2.5" /> En boleto
+                          </>
+                        ) : (
+                          <>
+                            <Plus className="h-2.5 w-2.5" /> Boleto
+                          </>
+                        )}
+                      </span>
                     </div>
                   </button>
                 );
@@ -564,19 +618,35 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
               )}
             >
               {/* Mobile back to list bar */}
-              <div className="flex items-center justify-between border-b border-[var(--border-hairline)] pb-2.5 lg:hidden">
+              <div className="flex items-center justify-between gap-2 border-b border-[var(--border-hairline)] pb-2.5 lg:hidden">
                 <button
                   type="button"
                   onClick={() => setMobileDetailOpen(false)}
                   className="inline-flex items-center gap-1 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2.5 py-1.5 text-xs font-semibold text-[var(--text-primary)] cursor-pointer"
                 >
                   <ChevronLeft className="h-4 w-4" />
-                  Volver a la lista ({filteredItems.length})
+                  Volver ({filteredItems.length})
                 </button>
-                <span className="num text-[11px] font-semibold text-amber-500">
-                  {selected.recommended_side === "OVER" ? "OVER" : "UNDER"} {selected.line.toFixed(1)}{" "}
-                  {statLabel(selected.stat)}
-                </span>
+                <button
+                  type="button"
+                  onClick={() => toggleLockPick(selected.id)}
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-semibold cursor-pointer",
+                    lockedPickIds.includes(selected.id)
+                      ? "bg-amber-500 text-slate-950"
+                      : "border border-[var(--border-hairline)] bg-[var(--bg-subtle)] text-[var(--text-primary)]"
+                  )}
+                >
+                  {lockedPickIds.includes(selected.id) ? (
+                    <>
+                      <Check className="h-3.5 w-3.5" /> En boleto
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="h-3.5 w-3.5" /> Sumar a combinada
+                    </>
+                  )}
+                </button>
               </div>
 
               {/* Header: Avatar + Matchup + Vegas Spread/Total + Defense */}
@@ -858,6 +928,17 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
           ) : null}
         </div>
       )}
+
+      {parlayOpen ? (
+        <ParlayBuilderModal
+          gameDate={board?.game_date ?? activeDate}
+          boardItems={allItems}
+          lockedPickIds={lockedPickIds}
+          onToggleLock={toggleLockPick}
+          onClearLocks={() => setLockedPickIds([])}
+          onClose={() => setParlayOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

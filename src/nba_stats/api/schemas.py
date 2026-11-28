@@ -194,3 +194,46 @@ class PlayerProfileResponse(BaseModel):
     total_games: int
     splits: list[PlayerSplitsSummary] = Field(default_factory=list)
     recent_games: list[PlayerGameLogItem] = Field(default_factory=list)
+
+
+class ParlayBuildRequest(BaseModel):
+    game_date: str | None = None
+    target_odds: float = Field(default=3.5, ge=1.2, le=100.0)
+    locked_pick_ids: list[str] = Field(default_factory=list)
+    excluded_pick_ids: list[str] = Field(default_factory=list)
+    min_legs: int = Field(default=2, ge=1, le=10)
+    max_legs: int = Field(default=5, ge=1, le=10)
+    allowed_stats: list[str] | None = None
+    require_ml_agrees: bool = True
+    exclude_blowout: bool = True
+    exclude_dtd: bool = True
+    one_per_player: bool = False
+    one_per_game: bool = False
+    max_results: int = Field(default=3, ge=1, le=5)
+
+
+class SaveParlayLegInput(BaseModel):
+    pick_id: str
+    player_id: int
+    player_name: str
+    team_abbreviation: str
+    opponent_abbreviation: str
+    stat: str
+    side: str
+    line: float
+    odds_decimal: float
+    ml_projection: float | None = None
+    ml_edge: float | None = None
+    l10_pct: float | None = None
+    conviction_score: int | None = None
+    locked: bool = False
+
+
+class SaveParlayRequest(BaseModel):
+    game_date: str
+    label: str = "Combinada"
+    target_odds: float | None = None
+    combined_odds: float = Field(gt=1.0)
+    estimated_prob: float | None = None
+    stake_units: float = Field(default=1.0, gt=0.0, le=100.0)
+    legs: list[SaveParlayLegInput] = Field(min_length=1, max_length=15)

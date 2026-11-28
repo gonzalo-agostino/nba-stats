@@ -592,3 +592,137 @@ export function fetchPlayerChart(params: {
 export function fetchPlayerProfile(playerId: number, limit = 15): Promise<PlayerProfileResponse> {
   return requestJson<PlayerProfileResponse>(`/api/v1/players/${playerId}/profile?limit=${limit}`);
 }
+
+export interface ParlayLeg {
+  pick_id: string;
+  game_id?: string;
+  player_id: number;
+  player_name: string;
+  team_abbreviation: string;
+  opponent_abbreviation: string;
+  is_home?: boolean;
+  is_back_to_back?: boolean;
+  injury_status?: string | null;
+  blowout_risk?: boolean;
+  stat: string;
+  bookmaker?: string;
+  line: number;
+  side: "OVER" | "UNDER" | string;
+  odds_decimal: number;
+  ml_projection: number | null;
+  ml_edge: number | null;
+  ml_agrees?: boolean;
+  l10_pct: number | null;
+  l10_hits?: number;
+  l10_total?: number;
+  conviction_score: number | null;
+  est_prob?: number;
+  locked: boolean;
+  status?: "PENDING" | "WIN" | "LOSS" | "VOID" | string;
+  actual_value?: number | null;
+}
+
+export interface ParlaySuggestion {
+  strategy: string;
+  legs: ParlayLeg[];
+  num_legs: number;
+  combined_odds: number;
+  target_odds: number;
+  odds_diff: number;
+  estimated_prob_pct: number;
+  implied_prob_pct: number;
+  ev_pct: number;
+  avg_conviction: number;
+  warnings: string[];
+}
+
+export interface ParlayBuildRequest {
+  game_date?: string;
+  target_odds: number;
+  locked_pick_ids: string[];
+  excluded_pick_ids?: string[];
+  min_legs?: number;
+  max_legs?: number;
+  allowed_stats?: string[] | null;
+  require_ml_agrees?: boolean;
+  exclude_blowout?: boolean;
+  exclude_dtd?: boolean;
+  one_per_player?: boolean;
+  one_per_game?: boolean;
+  max_results?: number;
+}
+
+export interface ParlayBuildResponse {
+  game_date: string;
+  target_odds: number;
+  locked_count: number;
+  candidates_evaluated: number;
+  parlays: ParlaySuggestion[];
+  note: string | null;
+}
+
+export interface TrackedParlayItem {
+  parlay_id: string;
+  game_date: string;
+  label: string;
+  target_odds: number | null;
+  combined_odds: number;
+  estimated_prob: number | null;
+  stake_units: number;
+  legs: ParlayLeg[];
+  status: "PENDING" | "WIN" | "LOSS" | "VOID" | string;
+  legs_won: number;
+  legs_lost: number;
+  legs_void: number;
+  legs_total: number;
+  effective_odds: number;
+  profit_units: number | null;
+  created_at: string;
+}
+
+export interface ParlayHistoryResponse {
+  overall: {
+    total: number;
+    wins: number;
+    losses: number;
+    voids: number;
+    pending: number;
+    win_rate_pct: number | null;
+    roi_pct: number | null;
+    net_units: number;
+    avg_odds: number | null;
+  };
+  parlays: TrackedParlayItem[];
+}
+
+export function buildParlay(req: ParlayBuildRequest): Promise<ParlayBuildResponse> {
+  return requestJson<ParlayBuildResponse>("/api/v1/props/build-parlay", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export function saveTrackedParlay(payload: {
+  game_date: string;
+  label: string;
+  target_odds?: number | null;
+  combined_odds: number;
+  estimated_prob?: number | null;
+  stake_units?: number;
+  legs: ParlayLeg[];
+}): Promise<{ parlay_id: string; status: string }> {
+  return requestJson("/api/v1/props/parlays", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchTrackedParlays(limit = 100): Promise<ParlayHistoryResponse> {
+  return requestJson<ParlayHistoryResponse>(`/api/v1/props/parlays?limit=${limit}`);
+}
+
+export function deleteTrackedParlay(parlayId: string): Promise<{ status: string }> {
+  return requestJson(`/api/v1/props/parlays/${encodeURIComponent(parlayId)}`, {
+    method: "DELETE",
+  });
+}
