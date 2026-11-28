@@ -37,6 +37,12 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  overscroll-behavior-y: contain;
+  -webkit-tap-highlight-color: transparent;
+}
+
 body {
   background-color: var(--bg-canvas);
   color: var(--text-primary);
@@ -48,6 +54,24 @@ body {
 .num {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Prevent iOS Safari zoom when focusing inputs/selects in PWA */
+@media (max-width: 639px) {
+  input[type="text"],
+  input[type="number"],
+  select {
+    font-size: 16px;
+  }
 }
 
 /* Thin discrete scrollbars for dense roster lists */

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronLeft,
   Loader2,
   Minus,
   Plus,
@@ -58,6 +59,7 @@ interface PropsBoardViewProps {
 }
 
 export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewProps) {
+  const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [board, setBoard] = useState<PropBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [capturing, setCapturing] = useState(false);
@@ -273,10 +275,10 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
   return (
     <div className="space-y-3">
       {/* Top Filter & Capture Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-3.5 py-2.5">
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Stat filter */}
-          <div className="inline-flex h-7 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] p-0.5 text-[11px]">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-3 py-2.5 sm:px-3.5">
+        <div className="flex w-full flex-wrap items-center gap-2 lg:w-auto">
+          {/* Stat filter (horizontally scrollable on mobile) */}
+          <div className="flex max-w-full overflow-x-auto no-scrollbar h-7 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] p-0.5 text-[11px]">
             <button
               type="button"
               onClick={() => setStatFilter("ALL")}
@@ -452,10 +454,15 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
           </button>
         </div>
       ) : (
-        /* Main Outlier-Style Split Screen */
+        /* Main Outlier-Style Split Screen (Master-Detail on mobile, Side-by-Side on desktop) */
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[370px_1fr]">
           {/* LEFT: Compact Props Feed */}
-          <div className="max-h-[76vh] overflow-y-auto rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] divide-y divide-[var(--border-hairline)]">
+          <div
+            className={cn(
+              "overflow-y-auto rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] divide-y divide-[var(--border-hairline)] lg:max-h-[76vh]",
+              mobileDetailOpen ? "hidden lg:block" : "block"
+            )}
+          >
             {filteredItems.length === 0 ? (
               <div className="p-6 text-center text-xs text-[var(--text-muted)]">
                 Ningún prop coincide con estos filtros.
@@ -470,9 +477,15 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
                       itemRefs.current[item.id] = el;
                     }}
                     type="button"
-                    onClick={() => setSelectedId(item.id)}
+                    onClick={() => {
+                      setSelectedId(item.id);
+                      setMobileDetailOpen(true);
+                      if (window.innerWidth < 1024) {
+                        window.scrollTo({ top: 0, behavior: "smooth" });
+                      }
+                    }}
                     className={cn(
-                      "flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left transition-colors cursor-pointer",
+                      "flex w-full items-center justify-between gap-2 px-3 py-3 text-left transition-colors sm:py-2.5 cursor-pointer",
                       isSelected
                         ? "bg-amber-500/10 border-l-2 border-l-amber-500"
                         : "hover:bg-[var(--bg-subtle)]"
@@ -544,7 +557,28 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
 
           {/* RIGHT: Visual Evidence Panel */}
           {selected ? (
-            <div className="space-y-3.5 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-4">
+            <div
+              className={cn(
+                "space-y-3.5 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-3.5 sm:p-4",
+                mobileDetailOpen ? "block" : "hidden lg:block"
+              )}
+            >
+              {/* Mobile back to list bar */}
+              <div className="flex items-center justify-between border-b border-[var(--border-hairline)] pb-2.5 lg:hidden">
+                <button
+                  type="button"
+                  onClick={() => setMobileDetailOpen(false)}
+                  className="inline-flex items-center gap-1 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2.5 py-1.5 text-xs font-semibold text-[var(--text-primary)] cursor-pointer"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  Volver a la lista ({filteredItems.length})
+                </button>
+                <span className="num text-[11px] font-semibold text-amber-500">
+                  {selected.recommended_side === "OVER" ? "OVER" : "UNDER"} {selected.line.toFixed(1)}{" "}
+                  {statLabel(selected.stat)}
+                </span>
+              </div>
+
               {/* Header: Avatar + Matchup + Vegas Spread/Total + Defense */}
               <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--border-hairline)] pb-3">
                 <div className="flex items-center gap-3">

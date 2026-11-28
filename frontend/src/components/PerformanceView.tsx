@@ -178,7 +178,7 @@ export function PerformanceView({ activeDate }: PerformanceViewProps) {
       {/* Top KPI Cards */}
       {overall ? (
         <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-5">
-          <div className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-3.5 py-2.5">
+          <div className="col-span-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-3.5 py-2.5 sm:col-span-1">
             <div className="text-[11px] text-[var(--text-muted)]">Win Rate</div>
             <div className="num mt-0.5 text-xl font-bold text-[var(--text-primary)]">
               {overall.win_rate_pct !== null ? `${overall.win_rate_pct.toFixed(1)}%` : "—"}
@@ -397,9 +397,9 @@ export function PerformanceView({ activeDate }: PerformanceViewProps) {
               : ""}
             )
           </h3>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
             {availableStats.length > 1 ? (
-              <div className="inline-flex h-6 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] p-0.5 text-[10px]">
+              <div className="flex max-w-full overflow-x-auto no-scrollbar h-6 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] p-0.5 text-[10px]">
                 <button
                   type="button"
                   onClick={() => setStatFilter("ALL")}
@@ -489,8 +489,91 @@ export function PerformanceView({ activeDate }: PerformanceViewProps) {
             <strong className="text-[var(--text-primary)]">Capturar líneas y picks</strong> para analizar la cartelera con líneas reales de mercado.
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-xs">
+          <>
+            {/* Mobile Pick Cards (< md) */}
+            <div className="divide-y divide-[var(--border-hairline)] md:hidden">
+              {filteredPicks.map((p) => (
+                <div key={p.pick_id} className="space-y-2 px-3.5 py-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <PlayerAvatar playerId={p.player_id} name={p.player_name} size="sm" />
+                      <div className="min-w-0">
+                        <div className="truncate text-xs font-semibold text-[var(--text-primary)]">
+                          {p.player_name}
+                        </div>
+                        <div className="num text-[10px] text-[var(--text-muted)]">
+                          {p.game_date} · {p.team_abbreviation} vs {p.opponent_abbreviation}
+                        </div>
+                      </div>
+                    </div>
+                    <span
+                      className={cn(
+                        "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold",
+                        p.status === "WIN"
+                          ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                          : p.status === "LOSS"
+                          ? "bg-rose-500/15 text-rose-600 dark:text-rose-400"
+                          : p.status === "PENDING"
+                          ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                          : "bg-[var(--bg-subtle)] text-[var(--text-muted)]"
+                      )}
+                    >
+                      {p.status === "WIN"
+                        ? "GANADO"
+                        : p.status === "LOSS"
+                        ? "PERDIDO"
+                        : p.status === "PENDING"
+                        ? "PENDIENTE"
+                        : p.status}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] num">
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className={cn(
+                          "rounded px-1.5 py-0.5 text-[10px] font-semibold",
+                          p.side === "OVER"
+                            ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                            : "bg-sky-500/15 text-sky-600 dark:text-sky-400"
+                        )}
+                      >
+                        {p.side}
+                      </span>
+                      <span className="font-semibold text-[var(--text-primary)]">
+                        {p.line.toFixed(1)} {p.stat.toUpperCase()}
+                      </span>
+                      <span className="text-[var(--text-muted)]">@{p.odds_decimal.toFixed(2)}</span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className="text-amber-600 dark:text-amber-400 font-semibold">
+                        ML {p.projected_value.toFixed(1)}
+                      </span>
+                      <span
+                        className={cn(
+                          "font-semibold",
+                          p.edge >= 0
+                            ? "text-emerald-600 dark:text-emerald-400"
+                            : "text-rose-600 dark:text-rose-400"
+                        )}
+                      >
+                        ({formatSigned(p.edge, 1)})
+                      </span>
+                      {p.actual_value !== null ? (
+                        <span className="rounded bg-[var(--bg-subtle)] px-1.5 py-0.5 font-semibold text-[var(--text-primary)]">
+                          Real: {p.actual_value.toFixed(0)}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Desktop Table (>= md) */}
+            <div className="hidden overflow-x-auto md:block">
+              <table className="w-full border-collapse text-xs">
               <thead>
                 <tr className="border-b border-[var(--border-hairline)] text-[10px] font-medium text-[var(--text-muted)]">
                   <th className="px-3 py-2 text-left">Fecha</th>
@@ -579,6 +662,7 @@ export function PerformanceView({ activeDate }: PerformanceViewProps) {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </div>
     </div>

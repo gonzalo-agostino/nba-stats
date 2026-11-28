@@ -273,24 +273,43 @@ export function playerHeadshotUrl(playerId: number): string {
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${url}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-  });
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
+  const method = (init?.method ?? "GET").toUpperCase();
+  const maxAttempts = method === "GET" ? 2 : 1;
+  let lastErr: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const body = await res.json();
-      if (body?.detail) detail = String(body.detail);
-    } catch {
-      // ignore non-json error body
+      const res = await fetch(`${API_BASE}${url}`, {
+        ...init,
+        headers: {
+          "Content-Type": "application/json",
+          ...(init?.headers ?? {}),
+        },
+      });
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (body?.detail) detail = String(body.detail);
+        } catch {
+          // ignore non-json error body
+        }
+        throw new Error(detail);
+      }
+      return (await res.json()) as T;
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : "";
+      const isNetworkErr =
+        err instanceof TypeError || /load failed|failed to fetch|network/i.test(msg);
+      if (attempt < maxAttempts && isNetworkErr) {
+        await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
+      throw err;
     }
-    throw new Error(detail);
   }
-  return res.json() as Promise<T>;
+  throw lastErr instanceof Error ? lastErr : new Error("Error de conexión con el servidor.");
 }
 
 export interface HealthResponse {

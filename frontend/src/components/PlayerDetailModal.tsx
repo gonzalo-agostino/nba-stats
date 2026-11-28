@@ -106,15 +106,15 @@ export function PlayerDetailModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 sm:p-6 backdrop-blur-[2px]"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 sm:items-center sm:p-6 backdrop-blur-[2px]"
       onClick={onClose}
     >
       <div
-        className="relative max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-canvas)] text-[var(--text-primary)] shadow-2xl"
+        className="relative max-h-[92dvh] w-full max-w-4xl overflow-y-auto rounded-t-2xl border border-[var(--border-hairline)] bg-[var(--bg-canvas)] text-[var(--text-primary)] shadow-2xl sm:max-h-[90vh] sm:rounded-lg"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Top Header */}
-        <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-[var(--border-hairline)] bg-[var(--bg-panel)] px-5 py-3.5">
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-[var(--border-hairline)] bg-[var(--bg-panel)] px-4 py-3 sm:px-5 sm:py-3.5">
           <div className="flex items-center gap-3.5 min-w-0">
             <PlayerAvatar playerId={row.player_id} name={row.player_name} size="lg" />
             <div className="min-w-0">

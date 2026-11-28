@@ -279,7 +279,7 @@ export function TeamBoxscoreTable({
                         onClick={() => onToggleOut(row.player_id)}
                         aria-label={`Marcar ${row.player_name} como baja`}
                         className={cn(
-                          "inline-flex h-4 w-4 items-center justify-center rounded border transition-colors cursor-pointer",
+                          "inline-flex h-5 w-5 sm:h-4 sm:w-4 items-center justify-center rounded border transition-colors cursor-pointer",
                           row.is_out
                             ? "border-rose-500 bg-rose-500 text-white"
                             : "border-[var(--border-hairline)] bg-[var(--bg-panel)] hover:border-[var(--accent)]"
@@ -289,8 +289,8 @@ export function TeamBoxscoreTable({
                       </button>
                     </td>
 
-                    {/* Player Avatar + Name (opens full profile) + quick-expand chevron */}
-                    <td className="px-1.5 py-0 align-middle">
+                    {/* Player Avatar + Name (sticky on mobile horizontal scroll) */}
+                    <td className="sticky left-0 z-10 bg-[var(--bg-canvas)] px-1.5 py-0 align-middle sm:static sm:bg-transparent">
                       <div className="flex items-center gap-1.5">
                         {!row.is_out ? (
                           <button

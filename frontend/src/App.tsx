@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
+  BarChart3,
   ChevronLeft,
   ChevronRight,
   CornerDownLeft,
+  Download,
+  LayoutGrid,
   Loader2,
   Moon,
   RefreshCw,
   Search,
   Sparkles,
   Sun,
+  Trophy,
   X,
 } from "lucide-react";
 import {
@@ -46,6 +50,10 @@ function shiftIsoDate(isoDate: string, deltaDays: number): string {
 export function App() {
   const [darkMode, setDarkMode] = useState(true);
   const [activeTab, setActiveTab] = useState<"props" | "games" | "performance">("props");
+  const [perfMounted, setPerfMounted] = useState(false);
+  const [installPrompt, setInstallPrompt] = useState<
+    (Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: string }> }) | null
+  >(null);
   const [teams, setTeams] = useState<TeamItem[]>([]);
   const [latestGameDate, setLatestGameDate] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -95,8 +103,30 @@ export function App() {
   const [aiError, setAiError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (activeTab === "performance") setPerfMounted(true);
+  }, [activeTab]);
+
+  useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
+
+  useEffect(() => {
+    function onBeforeInstall(e: Event) {
+      e.preventDefault();
+      setInstallPrompt(
+        e as Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: string }> }
+      );
+    }
+    window.addEventListener("beforeinstallprompt", onBeforeInstall);
+    return () => window.removeEventListener("beforeinstallprompt", onBeforeInstall);
+  }, []);
+
+  async function handleInstallPwa() {
+    if (!installPrompt) return;
+    await installPrompt.prompt();
+    await installPrompt.userChoice;
+    setInstallPrompt(null);
+  }
 
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
@@ -382,10 +412,10 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-[var(--bg-canvas)] text-[var(--text-primary)]">
-      <div className="mx-auto max-w-7xl p-4 sm:py-5">
+      <div className="mx-auto max-w-7xl px-3 pt-3 pb-24 sm:p-4 sm:py-5">
         {/* 1. Top Unified Bar: Brand + Player Search / LangGraph AI + Theme */}
         <div ref={topSearchRef} className="relative mb-3">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
             <button
               type="button"
               onClick={() => setActiveTab("props")}
@@ -416,12 +446,45 @@ export function App() {
                   <path d="M25.8 5.2 C20.5 10.5 20.5 21.5 25.8 26.8" />
                 </g>
               </svg>
-              <span className="hidden text-sm font-bold tracking-tight text-[var(--text-primary)] sm:inline">
+              <span className="text-sm font-bold tracking-tight text-[var(--text-primary)]">
                 NBA<span className="text-amber-500">Stats</span>
               </span>
             </button>
 
-            <div className="inline-flex h-9 shrink-0 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-0.5 text-xs">
+            {/* Mobile right-side quick actions (Sync, Install PWA, Theme) */}
+            <div className="ml-auto flex items-center gap-1.5 sm:hidden">
+              {installPrompt ? (
+                <button
+                  type="button"
+                  onClick={() => void handleInstallPwa()}
+                  className="inline-flex h-8 items-center gap-1 rounded-md bg-amber-500 px-2 text-[11px] font-semibold text-slate-950 cursor-pointer"
+                >
+                  <Download className="h-3 w-3" />
+                  App
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => void handleSyncWarehouse()}
+                disabled={syncing}
+                aria-label="Sincronizar datos"
+                className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-2 text-[11px] font-medium text-[var(--text-secondary)] disabled:opacity-50 cursor-pointer"
+              >
+                <RefreshCw className={cn("h-3 w-3", syncing && "animate-spin text-[var(--accent)]")} />
+                <span className="num">{latestGameDate ? latestGameDate.slice(5) : "Sync"}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDarkMode((d) => !d)}
+                aria-label="Cambiar tema"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] text-[var(--text-secondary)] cursor-pointer"
+              >
+                {darkMode ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+              </button>
+            </div>
+
+            {/* Desktop primary tabs (mobile uses fixed bottom nav bar) */}
+            <div className="hidden h-9 shrink-0 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-0.5 text-xs sm:inline-flex">
               <button
                 type="button"
                 onClick={() => setActiveTab("props")}
@@ -460,92 +523,107 @@ export function App() {
               </button>
             </div>
 
-            <div className="inline-flex h-9 shrink-0 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-0.5 text-xs">
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchMode("player");
-                  setGlobalAiError(null);
-                }}
-                className={cn(
-                  "rounded px-2.5 font-medium transition-colors cursor-pointer",
-                  searchMode === "player"
-                    ? "bg-[var(--accent)] text-white"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                )}
-              >
-                Jugador
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchMode("ai");
-                  setDropdownOpen(false);
-                }}
-                className={cn(
-                  "inline-flex items-center gap-1 rounded px-2.5 font-medium transition-colors cursor-pointer",
-                  searchMode === "ai"
-                    ? "bg-[var(--accent)] text-white"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                )}
-              >
-                <Sparkles className="h-3 w-3" />
-                Consultar IA
-              </button>
-            </div>
-
-            <form
-              onSubmit={handleTopFormSubmit}
-              className="flex h-9 flex-1 items-center gap-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-2.5 focus-within:border-[var(--accent)]"
-            >
-              {searchMode === "player" ? (
-                <Search className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
-              ) : (
-                <Sparkles className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
-              )}
-              <input
-                type="text"
-                value={topInput}
-                onFocus={() => searchMode === "player" && setDropdownOpen(true)}
-                onChange={(e) => {
-                  setTopInput(e.target.value);
-                  if (searchMode === "player") setDropdownOpen(true);
-                }}
-                placeholder={
-                  searchMode === "player"
-                    ? "Buscar jugador (ej. Jokic, Brunson, Tatum)..."
-                    : "Consultar al Agente LangGraph (ej. Jamal Murray vs LAL en B2B sin Jokic)..."
-                }
-                className="h-full flex-1 bg-transparent text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
-              />
-              {topInput ? (
+            {/* Search row: full width on mobile, inline on desktop */}
+            <div className="flex w-full items-center gap-1.5 sm:w-auto sm:flex-1 sm:gap-2">
+              <div className="inline-flex h-9 shrink-0 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-0.5 text-xs">
                 <button
                   type="button"
                   onClick={() => {
-                    setTopInput("");
-                    setPlayerMatches([]);
+                    setSearchMode("player");
+                    setGlobalAiError(null);
                   }}
-                  aria-label="Limpiar"
-                  className="text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              ) : null}
-              {searchMode === "ai" ? (
-                <button
-                  type="submit"
-                  disabled={globalAiLoading || topInput.trim().length < 3}
-                  className="inline-flex h-6 items-center gap-1 rounded bg-[var(--accent)] px-2 text-[11px] font-medium text-white disabled:opacity-40 cursor-pointer"
-                >
-                  {globalAiLoading ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <CornerDownLeft className="h-3 w-3" />
+                  className={cn(
+                    "rounded px-2 font-medium transition-colors sm:px-2.5 cursor-pointer",
+                    searchMode === "player"
+                      ? "bg-[var(--accent)] text-white"
+                      : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                   )}
-                  Enviar
+                >
+                  Jugador
                 </button>
-              ) : null}
-            </form>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchMode("ai");
+                    setDropdownOpen(false);
+                  }}
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded px-2 font-medium transition-colors sm:px-2.5 cursor-pointer",
+                    searchMode === "ai"
+                      ? "bg-[var(--accent)] text-white"
+                      : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  )}
+                >
+                  <Sparkles className="h-3 w-3" />
+                  <span className="sm:hidden">IA</span>
+                  <span className="hidden sm:inline">Consultar IA</span>
+                </button>
+              </div>
+
+              <form
+                onSubmit={handleTopFormSubmit}
+                className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] px-2.5 focus-within:border-[var(--accent)]"
+              >
+                {searchMode === "player" ? (
+                  <Search className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
+                ) : (
+                  <Sparkles className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
+                )}
+                <input
+                  type="text"
+                  value={topInput}
+                  onFocus={() => searchMode === "player" && setDropdownOpen(true)}
+                  onChange={(e) => {
+                    setTopInput(e.target.value);
+                    if (searchMode === "player") setDropdownOpen(true);
+                  }}
+                  placeholder={
+                    searchMode === "player"
+                      ? "Buscar jugador (ej. Jokic, Brunson)..."
+                      : "Consultar IA (ej. Murray vs LAL sin Jokic)..."
+                  }
+                  className="h-full min-w-0 flex-1 bg-transparent text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
+                />
+                {topInput ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTopInput("");
+                      setPlayerMatches([]);
+                    }}
+                    aria-label="Limpiar"
+                    className="text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+                {searchMode === "ai" ? (
+                  <button
+                    type="submit"
+                    disabled={globalAiLoading || topInput.trim().length < 3}
+                    className="inline-flex h-6 shrink-0 items-center gap-1 rounded bg-[var(--accent)] px-2 text-[11px] font-medium text-white disabled:opacity-40 cursor-pointer"
+                  >
+                    {globalAiLoading ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <CornerDownLeft className="h-3 w-3" />
+                    )}
+                    Enviar
+                  </button>
+                ) : null}
+              </form>
+            </div>
+
+            {installPrompt ? (
+              <button
+                type="button"
+                onClick={() => void handleInstallPwa()}
+                className="hidden h-9 shrink-0 items-center gap-1.5 rounded-md bg-amber-500 px-2.5 text-[11px] font-semibold text-slate-950 hover:opacity-90 sm:inline-flex cursor-pointer"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Instalar
+              </button>
+            ) : null}
 
             <button
               type="button"
@@ -572,7 +650,7 @@ export function App() {
               type="button"
               onClick={() => setDarkMode((d) => !d)}
               aria-label="Cambiar tema"
-              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] cursor-pointer"
+              className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] sm:inline-flex cursor-pointer"
             >
               {darkMode ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
             </button>
@@ -635,14 +713,18 @@ export function App() {
           ) : null}
         </div>
 
-        {/* Main Content: Keep Props mounted for instant tab switching without re-fetching */}
+        {/* Main Content: Keep Props & Performance mounted for instant tab switching without re-fetching */}
         <div className={activeTab === "props" ? "" : "hidden"}>
           <PropsBoardView activeDate={slateDate || undefined} isActive={activeTab === "props"} />
         </div>
 
-        {activeTab === "performance" ? (
-          <PerformanceView activeDate={slateDate || undefined} />
-        ) : activeTab === "games" ? (
+        {perfMounted ? (
+          <div className={activeTab === "performance" ? "" : "hidden"}>
+            <PerformanceView activeDate={slateDate || undefined} />
+          </div>
+        ) : null}
+
+        {activeTab === "games" ? (
         <>
         {/* 2. Date Picker + Slate Games Strip */}
         <section className="mb-4 flex items-center gap-2 overflow-x-auto pb-1">
@@ -1038,6 +1120,42 @@ export function App() {
             );
           })()
         : null}
+
+      {/* Mobile Fixed Bottom Navigation Bar */}
+      <nav
+        aria-label="Navegación principal"
+        className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--border-hairline)] bg-[var(--bg-panel)]/95 backdrop-blur-md pb-[env(safe-area-inset-bottom)] sm:hidden"
+      >
+        <div className="grid h-14 grid-cols-3">
+          {(
+            [
+              { id: "props", label: "Props", icon: BarChart3 },
+              { id: "games", label: "Boxscore", icon: LayoutGrid },
+              { id: "performance", label: "Win Rate", icon: Trophy },
+            ] as const
+          ).map((tab) => {
+            const Icon = tab.icon;
+            const active = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => {
+                  setActiveTab(tab.id);
+                  window.scrollTo({ top: 0, behavior: "smooth" });
+                }}
+                className={cn(
+                  "flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium transition-colors cursor-pointer",
+                  active ? "text-amber-500 font-semibold" : "text-[var(--text-muted)]"
+                )}
+              >
+                <Icon className={cn("h-5 w-5", active && "text-amber-500")} />
+                <span>{tab.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </nav>
     </div>
   );
 }
