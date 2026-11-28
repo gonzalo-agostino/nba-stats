@@ -272,9 +272,13 @@ export function playerHeadshotUrl(playerId: number): string {
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
+const RETRYABLE_HTTP_STATUS = new Set([429, 502, 503, 504]);
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
-  const maxAttempts = method === "GET" ? 2 : 1;
+  const isIdempotentRead =
+    method === "GET" || url.startsWith("/api/v1/simulate");
+  const maxAttempts = isIdempotentRead ? 4 : 2;
   let lastErr: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -287,6 +291,10 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
         },
       });
       if (!res.ok) {
+        if (RETRYABLE_HTTP_STATUS.has(res.status) && attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, attempt * 1800));
+          continue;
+        }
         let detail = `HTTP ${res.status}`;
         try {
           const body = await res.json();
@@ -303,7 +311,7 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
       const isNetworkErr =
         err instanceof TypeError || /load failed|failed to fetch|network/i.test(msg);
       if (attempt < maxAttempts && isNetworkErr) {
-        await new Promise((r) => setTimeout(r, 1200));
+        await new Promise((r) => setTimeout(r, attempt * 1800));
         continue;
       }
       throw err;
