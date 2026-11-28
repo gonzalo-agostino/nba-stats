@@ -270,7 +270,7 @@ export function playerHeadshotUrl(playerId: number): string {
   return `https://cdn.nba.com/headshots/nba/latest/260x190/${playerId}.png`;
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${url}`, {
@@ -404,6 +404,7 @@ export interface PerformanceSummaryResponse {
   overall: PerformanceBucket;
   by_stat: PerformanceBucket[];
   by_edge_bucket: PerformanceBucket[];
+  by_date?: PerformanceBucket[];
   requests_remaining: number | null;
   picks: TrackedPickItem[];
 }

@@ -401,15 +401,26 @@ class OddsService:
         return len(rows_to_insert), False
 
     def get_lines_for_date(self, target_date: date) -> list[dict[str, Any]]:
-        """Return cached prop lines for a given date from DuckDB."""
+        """Return latest deduplicated cached prop lines per (player, stat) for a given date."""
         with self._connect_rw() as con:
             rows = con.execute(
                 """
+                WITH ranked AS (
+                    SELECT
+                        game_date, event_id, home_team, away_team, bookmaker,
+                        player_name, player_name_norm, stat, line, over_odds, under_odds,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY player_name_norm, stat
+                            ORDER BY fetched_at DESC, bookmaker ASC
+                        ) AS rn
+                    FROM prop_lines
+                    WHERE game_date = ?
+                )
                 SELECT
                     game_date, event_id, home_team, away_team, bookmaker,
                     player_name, player_name_norm, stat, line, over_odds, under_odds
-                FROM prop_lines
-                WHERE game_date = ?
+                FROM ranked
+                WHERE rn = 1
                 ORDER BY player_name ASC, stat ASC
                 """,
                 [target_date],
@@ -735,8 +746,8 @@ class OddsService:
             "voids": voids,
         }
 
-    def get_performance_summary(self, limit: int = 100) -> dict[str, Any]:
-        """Compute live Win Rate, ROI, net units, and breakdowns by stat and edge size."""
+    def get_performance_summary(self, limit: int = 150) -> dict[str, Any]:
+        """Compute live Win Rate, ROI, net units, and breakdowns across ALL tracked picks."""
         with self._connect_rw() as con:
             rows = con.execute(
                 """
@@ -747,12 +758,10 @@ class OddsService:
                     status, actual_value, profit_units
                 FROM tracked_picks
                 ORDER BY game_date DESC, ABS(edge) DESC
-                LIMIT ?
-                """,
-                [limit],
+                """
             ).fetchall()
 
-        picks = [
+        all_picks = [
             {
                 "pick_id": str(r[0]),
                 "game_date": str(r[1])[:10],
@@ -798,21 +807,35 @@ class OddsService:
                 "net_units": net_units,
             }
 
-        overall = _summarize(picks)
+        overall = _summarize(all_picks)
 
         by_stat: list[dict[str, Any]] = []
-        for st in sorted({p["stat"] for p in picks}):
-            sub = [p for p in picks if p["stat"] == st]
+        for st in sorted({p["stat"] for p in all_picks}):
+            sub = [p for p in all_picks if p["stat"] == st]
             by_stat.append({"label": st.upper(), **_summarize(sub)})
+        by_stat.sort(
+            key=lambda b: (
+                b["roi_pct"] is not None,
+                b["roi_pct"] if b["roi_pct"] is not None else -9999.0,
+                b["wins"],
+            ),
+            reverse=True,
+        )
+
+        by_date: list[dict[str, Any]] = []
+        for dt in sorted({p["game_date"] for p in all_picks}, reverse=True):
+            sub = [p for p in all_picks if p["game_date"] == dt]
+            by_date.append({"label": dt, **_summarize(sub)})
 
         buckets = [
+            ("Edge < 1.0", lambda e: abs(e) < 1.0),
             ("Edge 1.0 – 2.5", lambda e: 1.0 <= abs(e) < 2.5),
             ("Edge 2.5 – 4.0", lambda e: 2.5 <= abs(e) < 4.0),
             ("Edge 4.0+", lambda e: abs(e) >= 4.0),
         ]
         by_edge_bucket: list[dict[str, Any]] = []
         for label, pred in buckets:
-            sub = [p for p in picks if pred(float(p["edge"]))]
+            sub = [p for p in all_picks if pred(float(p["edge"]))]
             if sub:
                 by_edge_bucket.append({"label": label, **_summarize(sub)})
 
@@ -820,8 +843,9 @@ class OddsService:
             "overall": overall,
             "by_stat": by_stat,
             "by_edge_bucket": by_edge_bucket,
+            "by_date": by_date,
             "requests_remaining": self.requests_remaining,
-            "picks": picks,
+            "picks": all_picks[:limit],
         }
 
     @staticmethod

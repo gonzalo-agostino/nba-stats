@@ -68,6 +68,7 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
   const [statFilter, setStatFilter] = useState<string>("ALL");
   const [sideFilter, setSideFilter] = useState<"ALL" | "OVER" | "UNDER">("ALL");
   const [gameFilter, setGameFilter] = useState<string>("ALL");
+  const [teamFilter, setTeamFilter] = useState<string>("ALL");
   const [sortBy, setSortBy] = useState<"conviction" | "l10" | "edge">("conviction");
 
   // Selected Prop & Interactive Evidence State
@@ -141,11 +142,20 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
     return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
   });
 
+  const availableTeams = Array.from(
+    new Set(
+      allItems
+        .filter((i) => gameFilter === "ALL" || i.game_id === gameFilter)
+        .map((i) => i.team_abbreviation)
+    )
+  ).sort();
+
   const filteredItems = allItems
     .filter((i) => {
       if (statFilter !== "ALL" && i.stat !== statFilter) return false;
       if (sideFilter !== "ALL" && i.recommended_side !== sideFilter) return false;
       if (gameFilter !== "ALL" && i.game_id !== gameFilter) return false;
+      if (teamFilter !== "ALL" && i.team_abbreviation !== teamFilter) return false;
       return true;
     })
     .sort((a, b) => {
@@ -330,13 +340,33 @@ export function PropsBoardView({ activeDate, isActive = true }: PropsBoardViewPr
             <select
               aria-label="Filtrar por partido"
               value={gameFilter}
-              onChange={(e) => setGameFilter(e.target.value)}
+              onChange={(e) => {
+                setGameFilter(e.target.value);
+                setTeamFilter("ALL");
+              }}
               className="h-7 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2 text-[11px] font-medium text-[var(--text-primary)]"
             >
               <option value="ALL">Todos los partidos ({board.games.length})</option>
               {board.games.map((g) => (
                 <option key={g.game_id} value={g.game_id}>
                   {g.away_abbr} @ {g.home_abbr}
+                </option>
+              ))}
+            </select>
+          ) : null}
+
+          {/* Team filter (works standalone OR narrows down to Away/Home of selected game) */}
+          {availableTeams.length > 0 ? (
+            <select
+              aria-label="Filtrar por equipo"
+              value={teamFilter}
+              onChange={(e) => setTeamFilter(e.target.value)}
+              className="h-7 rounded border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-2 text-[11px] font-medium text-[var(--text-primary)]"
+            >
+              <option value="ALL">Todos los equipos</option>
+              {availableTeams.map((abbr) => (
+                <option key={abbr} value={abbr}>
+                  {abbr}
                 </option>
               ))}
             </select>

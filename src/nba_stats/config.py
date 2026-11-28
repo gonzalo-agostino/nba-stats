@@ -125,6 +125,11 @@ class Settings(BaseSettings):
     the_odds_api_key: str | None = None
     auto_sync_enabled: bool = True
 
+    # Cloud deployment (Vercel frontend + Hugging Face Spaces backend + HF Dataset persistence)
+    cors_origins: str = ""
+    hf_dataset_repo: str | None = None
+    hf_token: str | None = None
+
     @property
     def data_dir(self) -> Path:
         if self.nba_stats_data_dir.is_absolute():

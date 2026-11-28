@@ -38,6 +38,7 @@ from nba_stats.api.schemas import (
 )
 from nba_stats.api.slate import SlateService
 from nba_stats.config import Settings, load_ingestion_config
+from nba_stats.data.hf_sync import HFStorageSync
 from nba_stats.data.ingest import run_ingestion
 from nba_stats.simulator.schemas import ScenarioRequest, SimulationResult
 from nba_stats.simulator.what_if import EntityResolutionError, WhatIfSimulator
@@ -55,6 +56,7 @@ def create_app(
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
     cfg = settings or Settings()
+    hf_sync = HFStorageSync(settings=cfg)
 
     state: dict[str, Any] = {
         "simulator": simulator,
@@ -129,6 +131,7 @@ def create_app(
                     grade_res = await asyncio.to_thread(state["odds_service"].grade_pending_picks)
                     if grade_res.get("graded", 0) > 0:
                         logger.info("Auto-scheduler: graded %d pending picks.", grade_res["graded"])
+                    await asyncio.to_thread(hf_sync.push_db, f"Auto-sync & grade ({today})")
                     last_sync_day = today
 
                 # 2. Pre-game auto-snapshot (between 18:00 and 22:00 local, once per day, 0 duplicate credits)
@@ -153,6 +156,7 @@ def create_app(
                             snap.get("picks_registered", 0),
                             snap.get("lines_from_cache", False),
                         )
+                        await asyncio.to_thread(hf_sync.push_db, f"Auto-snapshot ({today})")
                     last_snapshot_day = today
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Auto-scheduler tick error: %s", exc)
@@ -161,6 +165,8 @@ def create_app(
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        if hf_sync.enabled:
+            await asyncio.to_thread(hf_sync.pull_on_startup)
         task: asyncio.Task[None] | None = None
         if enable_scheduler and cfg.auto_sync_enabled:
             task = asyncio.create_task(_auto_scheduler_loop())
@@ -177,14 +183,22 @@ def create_app(
         lifespan=_lifespan,
     )
 
+    extra_origins = [
+        o.strip().rstrip("/")
+        for o in (cfg.cors_origins or "").split(",")
+        if o.strip()
+    ]
+    cors_origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+        *extra_origins,
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://localhost:4173",
-            "http://127.0.0.1:4173",
-        ],
+        allow_origins=cors_origins,
+        allow_origin_regex=r"https://.*\.vercel\.app",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -213,6 +227,7 @@ def create_app(
         state["slate_service"]._cache.clear()
         state["injury_service"].get_injuries(force_refresh=True)
         grade_summary = state["odds_service"].grade_pending_picks()
+        hf_sync.push_db(commit_message="API sync & grade")
 
         summary = report.seasons[0] if report.seasons else None
         return {
@@ -250,7 +265,7 @@ def create_app(
         svc: OddsService = state["odds_service"]
         markets = FULL_MARKETS if mode.lower() == "full" else SAVER_MARKETS
         try:
-            return svc.snapshot_and_track_picks(
+            result = svc.snapshot_and_track_picks(
                 simulator=_get_simulator(),
                 slate_service=state["slate_service"],
                 injury_service=state["injury_service"],
@@ -259,6 +274,8 @@ def create_app(
                 force_refresh=force_refresh,
                 min_edge_override=min_edge,
             )
+            hf_sync.push_db(commit_message=f"API snapshot ({result.get('game_date')})")
+            return result
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -268,7 +285,10 @@ def create_app(
     def grade_picks() -> dict[str, Any]:
         """Grade all PENDING tracked picks against actual NBA game logs in DuckDB."""
         svc: OddsService = state["odds_service"]
-        return svc.grade_pending_picks()
+        res = svc.grade_pending_picks()
+        if res.get("graded", 0) > 0:
+            hf_sync.push_db(commit_message=f"API grade ({res['graded']} picks)")
+        return res
 
     @app.get("/api/v1/props/performance")
     def get_props_performance(

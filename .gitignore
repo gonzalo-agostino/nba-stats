@@ -10,8 +10,8 @@ build/
 .ruff_cache/
 
 # Local data & model artifacts
-data/
-artifacts/
+/data/
+/artifacts/
 
 # Secrets & environment
 .env

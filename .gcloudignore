@@ -1,0 +1,15 @@
+.gcloudignore
+.git
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+/frontend/
+/tests/
+/data/
+/artifacts/
+.env
+.agents/
+start-nba-stats.bat
+!src/nba_stats/data/

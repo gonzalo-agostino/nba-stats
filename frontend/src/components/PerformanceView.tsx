@@ -325,11 +325,77 @@ export function PerformanceView({ activeDate }: PerformanceViewProps) {
         </div>
       ) : null}
 
+      {/* Daily History Breakdown */}
+      {data?.by_date && data.by_date.length > 0 ? (
+        <div className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)] p-3.5">
+          <h3 className="mb-2 text-xs font-semibold text-[var(--text-secondary)]">
+            Historial acumulado por jornada ({data.by_date.length}{" "}
+            {data.by_date.length === 1 ? "día" : "días"})
+          </h3>
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-[var(--border-hairline)] text-[10px] text-[var(--text-muted)]">
+                  <th className="py-1.5 text-left">Fecha</th>
+                  <th className="py-1.5 text-right">Picks</th>
+                  <th className="py-1.5 text-right">Record</th>
+                  <th className="py-1.5 text-right">Pend.</th>
+                  <th className="py-1.5 text-right">Win Rate</th>
+                  <th className="py-1.5 text-right">Unidades</th>
+                  <th className="py-1.5 text-right">ROI</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--border-hairline)] num">
+                {data.by_date.map((b) => (
+                  <tr key={b.label}>
+                    <td className="py-1.5 font-sans font-medium">{b.label}</td>
+                    <td className="py-1.5 text-right text-[var(--text-muted)]">{b.total}</td>
+                    <td className="py-1.5 text-right">
+                      {b.wins}-{b.losses}
+                    </td>
+                    <td className="py-1.5 text-right text-[var(--text-muted)]">{b.pending}</td>
+                    <td className="py-1.5 text-right font-semibold">
+                      {b.win_rate_pct !== null ? `${b.win_rate_pct.toFixed(1)}%` : "—"}
+                    </td>
+                    <td
+                      className={cn(
+                        "py-1.5 text-right font-semibold",
+                        b.net_units >= 0
+                          ? "text-emerald-600 dark:text-emerald-400"
+                          : "text-rose-600 dark:text-rose-400"
+                      )}
+                    >
+                      {formatSigned(b.net_units, 2)}u
+                    </td>
+                    <td
+                      className={cn(
+                        "py-1.5 text-right font-semibold",
+                        b.roi_pct === null
+                          ? "text-[var(--text-muted)]"
+                          : b.roi_pct >= 0
+                          ? "text-emerald-600 dark:text-emerald-400"
+                          : "text-rose-600 dark:text-rose-400"
+                      )}
+                    >
+                      {b.roi_pct !== null ? `${formatSigned(b.roi_pct, 1)}%` : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
       {/* Picks Table */}
       <div className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-panel)]">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-hairline)] px-4 py-2.5">
           <h3 className="text-xs font-semibold text-[var(--text-secondary)]">
-            Top oportunidades por mayor Edge ({filteredPicks.length})
+            Top oportunidades por mayor Edge ({filteredPicks.length}
+            {overall && overall.total > allPicks.length
+              ? ` · mostrando últimos ${allPicks.length} de ${overall.total}`
+              : ""}
+            )
           </h3>
           <div className="flex flex-wrap items-center gap-2">
             {availableStats.length > 1 ? (
