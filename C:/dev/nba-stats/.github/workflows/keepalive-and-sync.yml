@@ -1,0 +1,39 @@
+name: Keep-Alive & Daily NBA Sync
+
+on:
+  schedule:
+    # Keep backend awake (every 6 hours)
+    - cron: "0 */6 * * *"
+    # Morning sync + pick grading (13:30 UTC = 10:30 ART)
+    - cron: "30 13 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping-and-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake up backend & check health
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          if [ -z "$BACKEND_URL" ]; then
+            echo "Falta configurar el secret BACKEND_URL en GitHub"
+            exit 0
+          fi
+          URL="${BACKEND_URL%/}"
+          echo "Checking health at $URL/api/v1/health ..."
+          curl -fsS --max-time 60 "$URL/api/v1/health"
+          echo ""
+
+      - name: Trigger daily NBA boxscore sync & pick grading
+        if: github.event.schedule == '30 13 * * *' || github.event_name == 'workflow_dispatch'
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          if [ -z "$BACKEND_URL" ]; then
+            exit 0
+          fi
+          URL="${BACKEND_URL%/}"
+          echo "Running daily sync at $URL/api/v1/sync ..."
+          curl -fsS -X POST --max-time 300 "$URL/api/v1/sync"
+          echo ""
