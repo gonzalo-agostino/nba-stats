@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -89,10 +91,17 @@ class OddsService:
         self.api_key = (api_key or "").strip() or None
         self.requests_remaining: int | None = None
         self.requests_used: int | None = None
+        self._board_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._schema_lock = threading.Lock()
+        self._schema_ready = False
 
     def _connect_rw(self) -> duckdb.DuckDBPyConnection:
         con = duckdb.connect(str(self.duckdb_path))
-        init_schema(con)
+        if not self._schema_ready:
+            with self._schema_lock:
+                if not self._schema_ready:
+                    init_schema(con)
+                    self._schema_ready = True
         return con
 
     def _update_quota_headers(self, resp: requests.Response) -> None:
@@ -397,6 +406,7 @@ class OddsService:
                     """,
                     rows_to_insert,
                 )
+            self._board_cache.clear()
 
         return len(rows_to_insert), False
 
@@ -642,35 +652,58 @@ class OddsService:
         with self._connect_rw() as con:
             pending = con.execute(
                 """
-                SELECT pick_id, game_date, player_id, stat, line, side, odds_decimal
+                SELECT pick_id, game_date, game_id, player_id, stat, line, side, odds_decimal
                 FROM tracked_picks
                 WHERE status = 'PENDING'
                 """
             ).fetchall()
 
-            for pick_id, gdate, pid, stat, line, side, odds in pending:
-                # Look up actual boxscore in +/- 1 day window (handles UTC/ET midnight offset)
-                log_rows = con.execute(
-                    """
-                    SELECT min, pts, reb, ast, stl, blk, tov, fg3m
-                    FROM player_game_logs
-                    WHERE player_id = ?
-                      AND game_date BETWEEN ? AND ?
-                    ORDER BY ABS(DATEDIFF('day', game_date, ?)) ASC
-                    LIMIT 1
-                    """,
-                    [pid, gdate - timedelta(days=1), gdate + timedelta(days=1), gdate],
-                ).fetchall()
+            for pick_id, gdate, game_id, pid, stat, line, side, odds in pending:
+                # Match exact game_id when available, otherwise exact game_date.
+                # Never use a +/- 1 day window: back-to-back games would grade
+                # today's unplayed pick with yesterday's boxscore.
+                gid = str(game_id).strip() if game_id is not None else ""
+                if gid:
+                    log_rows = con.execute(
+                        """
+                        SELECT min, pts, reb, ast, stl, blk, tov, fg3m
+                        FROM player_game_logs
+                        WHERE player_id = ?
+                          AND game_id = ?
+                        LIMIT 1
+                        """,
+                        [pid, gid],
+                    ).fetchall()
+                else:
+                    log_rows = con.execute(
+                        """
+                        SELECT min, pts, reb, ast, stl, blk, tov, fg3m
+                        FROM player_game_logs
+                        WHERE player_id = ?
+                          AND game_date = ?
+                        LIMIT 1
+                        """,
+                        [pid, gdate],
+                    ).fetchall()
 
                 if not log_rows:
-                    # Check if ANY games exist in DuckDB for that date -> player was DNP (VOID)
-                    day_games = int(
-                        con.execute(
-                            "SELECT COUNT(*) FROM games WHERE game_date = ?",
-                            [gdate],
-                        ).fetchall()[0][0]
-                    )
-                    if day_games > 0 and gdate < date.today():
+                    # Only mark DNP (VOID) if that specific game (or that exact past date)
+                    # has already been ingested into DuckDB.
+                    if gid:
+                        game_ingested = int(
+                            con.execute(
+                                "SELECT COUNT(*) FROM player_game_logs WHERE game_id = ?",
+                                [gid],
+                            ).fetchall()[0][0]
+                        )
+                    else:
+                        game_ingested = int(
+                            con.execute(
+                                "SELECT COUNT(*) FROM games WHERE game_date = ?",
+                                [gdate],
+                            ).fetchall()[0][0]
+                        )
+                    if game_ingested > 0 and gdate < date.today():
                         con.execute(
                             """
                             UPDATE tracked_picks
@@ -1001,6 +1034,11 @@ class OddsService:
         game_date_str: str | None = None,
     ) -> dict[str, Any]:
         """Build the visual Outlier-style Prop Board using cached lines, game logs, Spread/Total, and ML."""
+        cache_key = (game_date_str or "today").strip()[:10]
+        cached = self._board_cache.get(cache_key)
+        if cached is not None and (time.monotonic() - cached[0]) < 300.0:
+            return cached[1]
+
         slate = slate_service.get_today_slate(game_date=game_date_str)
         ref_date = date.fromisoformat(str(slate["game_date"])[:10])
         games = slate.get("games") or []
@@ -1239,10 +1277,12 @@ class OddsService:
             reverse=True,
         )
 
-        return {
+        result = {
             "game_date": ref_date.isoformat(),
             "games": game_meta_list,
             "total_props": len(board_items),
             "requests_remaining": self.requests_remaining,
             "items": board_items,
         }
+        self._board_cache[cache_key] = (time.monotonic(), result)
+        return result

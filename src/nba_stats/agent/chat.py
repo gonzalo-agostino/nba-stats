@@ -163,40 +163,39 @@ def run_copilot_chat(
         unrelated_notes: list[str] = []
 
         try:
-            target_info = simulator._resolve_player(resolved_player)
-            target_team_id = int(target_info["team_id"])
-            target_team_abbr = str(target_info["team_abbreviation"])
-            opp_team_id: int | None = None
-            opp_team_abbr: str | None = None
-            if opponent_team:
-                try:
-                    opp_info = simulator._resolve_team(opponent_team)
-                    opp_team_id = int(opp_info["team_id"])
-                    opp_team_abbr = str(opp_info["abbreviation"])
-                except EntityResolutionError:
-                    opp_team_abbr = opponent_team
+            with simulator._connect() as con:
+                target_info = simulator.resolve_player(con, resolved_player)
+                target_team_id = int(target_info.team_id)
+                target_team_abbr = str(target_info.team_abbreviation)
+                opp_team_id: int | None = None
+                opp_team_abbr: str | None = None
+                if opponent_team:
+                    try:
+                        opp_team_id, opp_team_abbr = simulator.resolve_team(con, opponent_team)
+                    except EntityResolutionError:
+                        opp_team_abbr = opponent_team
 
-            for out_name in raw_outs:
-                try:
-                    p_info = simulator._resolve_player(out_name)
-                    p_tid = int(p_info["team_id"])
-                    p_full = str(p_info["player_name"])
-                    p_abbr = str(p_info["team_abbreviation"])
-                    if p_tid == target_team_id:
-                        team_outs.append(p_full)
-                    elif opp_team_id is not None and p_tid == opp_team_id:
-                        opp_outs.append(p_full)
-                    else:
-                        unrelated_notes.append(
-                            f"{p_full} juega en {p_abbr} (ni en {target_team_abbr}"
-                            + (f" ni en {opp_team_abbr}" if opp_team_abbr else "")
-                            + ", así que no afecta directamente esta rotación)."
-                        )
-                except EntityResolutionError:
-                    unrelated_notes.append(f"No se encontró a '{out_name}' en la base de jugadores.")
+                for out_name in raw_outs:
+                    try:
+                        p_info = simulator.resolve_player(con, out_name)
+                        p_tid = int(p_info.team_id)
+                        p_full = str(p_info.player_name)
+                        p_abbr = str(p_info.team_abbreviation)
+                        if p_tid == target_team_id:
+                            team_outs.append(p_full)
+                        elif opp_team_id is not None and p_tid == opp_team_id:
+                            opp_outs.append(p_full)
+                        else:
+                            unrelated_notes.append(
+                                f"{p_full} juega en {p_abbr} (ni en {target_team_abbr}"
+                                + (f" ni en {opp_team_abbr}" if opp_team_abbr else "")
+                                + ", así que no afecta directamente esta rotación)."
+                            )
+                    except EntityResolutionError:
+                        unrelated_notes.append(f"No se encontró a '{out_name}' en la base de jugadores.")
 
             req = ScenarioRequest(
-                player_name=str(target_info["player_name"]),
+                player_name=str(target_info.player_name),
                 opponent_team=opp_team_abbr,
                 out_players=team_outs,
                 opponent_out_players=opp_outs,
