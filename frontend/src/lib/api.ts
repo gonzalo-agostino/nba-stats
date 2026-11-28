@@ -726,3 +726,27 @@ export function deleteTrackedParlay(parlayId: string): Promise<{ status: string 
     method: "DELETE",
   });
 }
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  tools_used?: string[];
+}
+
+export interface ChatResponse {
+  reply: string;
+  tools_used: string[];
+}
+
+export function sendChatMessages(
+  messages: { role: "user" | "assistant"; content: string }[],
+  activeDate?: string
+): Promise<ChatResponse> {
+  return requestJson<ChatResponse>("/api/v1/chat", {
+    method: "POST",
+    body: JSON.stringify({
+      messages,
+      active_date: activeDate ?? null,
+    }),
+  });
+}

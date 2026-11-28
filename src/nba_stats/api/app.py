@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger(__name__)
 
+from nba_stats.agent.chat import run_copilot_chat
 from nba_stats.agent.graph import build_prediction_graph, run_agent_query
 from nba_stats.agent.nodes import AgentNodes
 from nba_stats.api.injuries import InjuryService, normalize_name
@@ -23,6 +24,8 @@ from nba_stats.api.parlay import ParlayService, build_parlay_recommendations
 from nba_stats.api.schemas import (
     AskRequest,
     AskResponse,
+    ChatRequest,
+    ChatResponse,
     ExplainResponse,
     GamePaceSummary,
     GameSimulationRequest,
@@ -872,6 +875,27 @@ def create_app(
             clarification_message=out.get("clarification_message"),
             final_response=str(out.get("final_response", "")),
         )
+
+    @app.post("/api/v1/chat", response_model=ChatResponse)
+    def chat_copilot(request: ChatRequest) -> ChatResponse:
+        """Interactive multi-turn NBA Copilot with live access to ML simulator, props, parlays, injuries & WR."""
+        try:
+            res = run_copilot_chat(
+                messages=[m.model_dump() for m in request.messages],
+                simulator=_get_simulator(),
+                odds_service=state["odds_service"],
+                parlay_service=state["parlay_service"],
+                slate_service=state["slate_service"],
+                injury_service=state["injury_service"],
+                settings=cfg,
+                active_date=request.active_date,
+            )
+            return ChatResponse(
+                reply=str(res.get("reply") or ""),
+                tools_used=list(res.get("tools_used") or []),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Error en el chat IA: {exc}") from exc
 
     return app
 

@@ -7,6 +7,7 @@ import {
   Download,
   LayoutGrid,
   Loader2,
+  MessageSquare,
   Moon,
   RefreshCw,
   Search,
@@ -34,6 +35,7 @@ import {
   type TeamSimulationResponse,
 } from "@/lib/api";
 import { AiAnalysisBlock } from "@/components/AiAnalysisBlock";
+import { ChatCopilot } from "@/components/ChatCopilot";
 import { PlayerAvatar } from "@/components/PlayerAvatar";
 import { PerformanceView } from "@/components/PerformanceView";
 import { PlayerDetailModal } from "@/components/PlayerDetailModal";
@@ -49,7 +51,7 @@ function shiftIsoDate(isoDate: string, deltaDays: number): string {
 
 export function App() {
   const [darkMode, setDarkMode] = useState(true);
-  const [activeTab, setActiveTab] = useState<"props" | "games" | "performance">("props");
+  const [activeTab, setActiveTab] = useState<"props" | "games" | "performance" | "chat">("props");
   const [perfMounted, setPerfMounted] = useState(false);
   const [installPrompt, setInstallPrompt] = useState<
     (Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: string }> }) | null
@@ -520,6 +522,19 @@ export function App() {
                 )}
               >
                 Win Rate
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab("chat")}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded px-2.5 font-medium transition-colors cursor-pointer",
+                  activeTab === "chat"
+                    ? "bg-amber-500 text-slate-950 font-semibold"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                )}
+              >
+                <MessageSquare className="h-3 w-3" />
+                Chat IA
               </button>
             </div>
 
@@ -1094,6 +1109,11 @@ export function App() {
         )}
         </>
         ) : null}
+
+        {/* Interactive AI Chat Copilot (kept mounted so conversation persists across tabs) */}
+        <div className={cn(activeTab === "chat" ? "block" : "hidden")}>
+          <ChatCopilot activeDate={slateDate || undefined} />
+        </div>
       </div>
 
       {/* Dedicated Player Detail Modal (headshot, 13 stats, splits, 15 game logs, AI) */}
@@ -1126,12 +1146,13 @@ export function App() {
         aria-label="Navegación principal"
         className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--border-hairline)] bg-[var(--bg-panel)]/95 backdrop-blur-md pb-[env(safe-area-inset-bottom)] sm:hidden"
       >
-        <div className="grid h-14 grid-cols-3">
+        <div className="grid h-14 grid-cols-4">
           {(
             [
               { id: "props", label: "Props", icon: BarChart3 },
               { id: "games", label: "Boxscore", icon: LayoutGrid },
               { id: "performance", label: "Win Rate", icon: Trophy },
+              { id: "chat", label: "Chat IA", icon: MessageSquare },
             ] as const
           ).map((tab) => {
             const Icon = tab.icon;

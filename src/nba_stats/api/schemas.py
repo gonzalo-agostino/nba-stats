@@ -237,3 +237,18 @@ class SaveParlayRequest(BaseModel):
     estimated_prob: float | None = None
     stake_units: float = Field(default=1.0, gt=0.0, le=100.0)
     legs: list[SaveParlayLegInput] = Field(min_length=1, max_length=15)
+
+
+class ChatMessageItem(BaseModel):
+    role: str = Field(pattern="^(user|assistant)$")
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessageItem] = Field(min_length=1, max_length=24)
+    active_date: str | None = None
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    tools_used: list[str] = Field(default_factory=list)
